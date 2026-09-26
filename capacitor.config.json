@@ -1,0 +1,21 @@
+{
+  "appId": "com.weathergpt.mobile",
+  "appName": "WeatherGPT",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "StatusBar": {
+      "backgroundColor": "#f4f7f3",
+      "style": "DARK"
+    },
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon_config_sample",
+      "iconColor": "#347c58"
+    }
+  }
+}
