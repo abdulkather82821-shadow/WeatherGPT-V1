@@ -1,0 +1,55 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid} {
+      allow read: if request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.email_verified == true
+        && request.auth.token.firebase.sign_in_provider == 'google.com';
+
+      allow create, update: if request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.email_verified == true
+        && request.auth.token.firebase.sign_in_provider == 'google.com'
+        && request.resource.data.keys().hasOnly(['emailAlerts', 'updatedAt'])
+        && request.resource.data.emailAlerts is map
+        && request.resource.data.emailAlerts.keys().hasOnly(['enabled', 'categories', 'location'])
+        && request.resource.data.emailAlerts.enabled is bool
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.emailAlerts.categories is map
+        && request.resource.data.emailAlerts.categories.keys().hasOnly(['rain', 'storm', 'wind', 'heat', 'cold'])
+        && request.resource.data.emailAlerts.categories.values().hasOnly([true, false])
+        && request.resource.data.emailAlerts.location is map
+        && request.resource.data.emailAlerts.location.keys().hasOnly(['name', 'latitude', 'longitude', 'timezone'])
+        && request.resource.data.emailAlerts.location.name is string
+        && request.resource.data.emailAlerts.location.name.size() <= 100
+        && request.resource.data.emailAlerts.location.latitude is number
+        && request.resource.data.emailAlerts.location.latitude >= -90
+        && request.resource.data.emailAlerts.location.latitude <= 90
+        && request.resource.data.emailAlerts.location.longitude is number
+        && request.resource.data.emailAlerts.location.longitude >= -180
+        && request.resource.data.emailAlerts.location.longitude <= 180
+        && request.resource.data.emailAlerts.location.timezone is string
+        && request.resource.data.emailAlerts.location.timezone.size() <= 80
+        && (!request.resource.data.emailAlerts.enabled
+          || request.resource.data.emailAlerts.categories.values().hasAny([true]));
+
+      allow delete: if request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.email_verified == true
+        && request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+
+    match /emailAlertState/{stateId} {
+      allow read, write: if false;
+    }
+
+    match /emailAlertSystem/{systemId} {
+      allow read, write: if false;
+    }
+
+    match /emailDeliveryLimits/{limitId} {
+      allow read, write: if false;
+    }
+  }
+}

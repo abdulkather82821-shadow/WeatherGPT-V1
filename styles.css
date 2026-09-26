@@ -150,6 +150,13 @@ h1, h2, h3, p { margin-top: 0; }
 .agriculture-summary strong, .mode-insight strong { color: #4b5f4e; font-size: 10px; }
 .agriculture-summary p, .mode-insight p { margin: 4px 0 0; color: #7e8c81; font-size: 9px; line-height: 1.6; }
 .mode-insight.loading { opacity: .7; }
+.farmer-planner { margin-bottom: 14px; }
+.farmer-planner[hidden], .agriculture-summary[hidden] { display: none; }
+.field-planner-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; }
+.field-planner-controls label { display: grid; gap: 5px; color: #76847a; font-size: 9px; }
+.field-planner-controls select { min-width: 0; min-height: 35px; padding: 0 8px; border: 1px solid #e5ebe6; border-radius: 7px; background: white; color: #48584d; font-size: 9px; }
+.field-advice { margin-top: 10px; padding: 10px; border-radius: 8px; background: #f5f9f4; color: #5b705f; font-size: 9px; line-height: 1.65; }
+.field-disclaimer { margin: 8px 0 0; color: #929d94; font-size: 8px; line-height: 1.6; }
 
 .insight-row { margin-top: 16px; display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; }
 .advisory-card { min-height: 93px; position: relative; display: flex; align-items: flex-start; gap: 11px; padding: 14px; border: 1px solid #f2e9d7; border-radius: 11px; background: #fffcf5; }
@@ -180,17 +187,20 @@ h1, h2, h3, p { margin-top: 0; }
 .chat-messages { max-height: 200px; overflow: auto; }
 .chat-message { max-width: 86%; margin: 9px 0; padding: 10px 12px; border-radius: 10px; font-size: 10px; line-height: 1.6; }
 .chat-message.user { margin-left: auto; border: 1px solid #dfebe1; background: #edf5ee; color: #395541; }
-.chat-message.assistant { border: 1px solid #e9eeea; background: white; color: #647168; }
+.chat-message.assistant { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; border: 1px solid #e9eeea; background: white; color: #647168; }
+.message-speak { min-width: 28px; min-height: 28px; flex: 0 0 auto; border: 1px solid #e8ede8; border-radius: 7px; background: #f7faf6; cursor: pointer; }
 .chat-message.assistant strong { color: #3d6049; }
 .chat-message.error { border-color: #f0ddd6; background: #fff8f5; color: #8d594b; }
 .chat-composer { min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 5px 6px 5px 11px; border: 1px solid #e4eae5; border-radius: 10px; background: white; box-shadow: 0 3px 12px #314a3610; }
 .composer-tool { width: 26px; height: 26px; flex: 0 0 auto; border: 0; border-radius: 7px; background: #eef5ef; color: #5b946b; font-size: 15px; cursor: pointer; }
 .composer-tool.listening { background: #fff0ec; color: #ce705b; animation: pulse 1s infinite; }
+.hero-voice-button.listening { background: #a54d43; animation: pulse 1s infinite; }
 .chat-composer input { min-width: 0; flex: 1; border: 0; outline: 0; color: #425148; font-size: 10px; }
 .chat-composer input::placeholder { color: #a7b0a9; }
 .composer-shortcut { color: #abb4ac; font-size: 16px; }
 .send-button { width: 31px; height: 31px; flex: 0 0 auto; border: 0; border-radius: 8px; background: #347c58; color: white; font-size: 19px; cursor: pointer; }
 .disclaimer { margin: 8px 0 0; color: #9ba59d; text-align: center; font-size: 8px; }
+.voice-helper { margin: 7px 2px 0; color: #89958c; font-size: 8px; line-height: 1.6; }
 .footer { margin-top: 22px; padding-top: 11px; display: flex; justify-content: space-between; border-top: 1px solid #e9eee9; color: #9ba59d; font-size: 8px; }
 .footer-dot { padding: 0 3px; }
 .footer > span:last-child { display: flex; align-items: center; gap: 6px; }
@@ -294,6 +304,12 @@ h1, h2, h3, p { margin-top: 0; }
 .leaflet-container { font: 11px "DM Sans",sans-serif; }
 .map-legend { padding-top: 9px; display: flex; align-items: center; gap: 7px; color: #79867d; font-size: 9px; }
 .map-legend .source-chip { margin-left: auto; }
+.map-layer-picker { min-width: 0; display: flex; align-items: center; gap: 6px; color: #748177; font-size: 9px; }
+.map-layer-picker select { max-width: 175px; min-height: 32px; padding: 0 7px; border: 1px solid #e8ede8; border-radius: 7px; background: white; color: #54645a; font-size: 9px; }
+.weather-value-tooltip { padding: 2px 4px; border: 0; border-radius: 4px; background: #ffffffdd; box-shadow: 0 1px 4px #24372e44; color: #33473a; font-size: 8px; font-weight: 700; }
+.weather-value-tooltip::before { display: none; }
+.weather-condition-marker { border: 0; background: transparent; }
+.weather-condition-marker span { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #ffffff; border-radius: 50%; background: #ffffffdd; box-shadow: 0 1px 5px #24372e44; font-size: 17px; }
 .legend-dot { width: 7px; height: 7px; border-radius: 50%; background: #409565; box-shadow: 0 0 0 3px #e5f3e8; }
 .map-note { display: flex; align-items: flex-start; gap: 9px; padding: 11px; border: 1px solid #e8ede8; border-radius: 10px; background: #fbfcfa; color: #57906a; font-size: 15px; }
 .map-note strong { color: #4c5d51; font-size: 10px; }
@@ -325,6 +341,19 @@ h1, h2, h3, p { margin-top: 0; }
 .feed-item small { color: #a0a9a2; font-size: 8px; }
 .feed-item a { color: #47825a; font-size: 9px; text-decoration: none; }
 .official-item .feed-icon { color: #846a77; background: #f4edf1; }
+.relief-center { margin: 20px 0 10px; }
+.relief-intro { margin: 24px 0 12px; }
+.relief-intro h2 { margin: 0 0 5px; color: #34463a; font: 700 16px "Manrope",sans-serif; }
+.relief-intro > p:last-child { margin: 0; color: #829087; font-size: 9px; line-height: 1.6; }
+.relief-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; }
+.relief-card { min-width: 0; padding: 12px; display: flex; align-items: flex-start; gap: 9px; border: 1px solid #e8ede8; border-radius: 10px; background: #fff; }
+.relief-icon { flex: 0 0 auto; font-size: 18px; }
+.relief-card h3 { margin: 1px 0 5px; color: #48594c; font-size: 10px; }
+.relief-card p { margin: 0 0 7px; color: #7e8b81; font-size: 8px; line-height: 1.65; }
+.relief-card small { color: #97a198; font-size: 7px; line-height: 1.6; }
+.relief-action { display: inline-flex; padding: 0; border: 0; background: none; color: #45845a; text-align: left; text-decoration: none; font: 600 8px "DM Sans",sans-serif; cursor: pointer; }
+.emergency-note { margin: 10px 0; padding: 10px; border: 1px solid #efdfd7; border-radius: 8px; background: #fff9f5; color: #7a655a; font-size: 8px; line-height: 1.6; }
+.emergency-note a { color: #9a5145; font-weight: 700; }
 .climate-tools { margin-bottom: 12px; padding: 11px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 10px; background: white; }
 .climate-tools label { color: #6e7c72; font-size: 9px; }
 .climate-tools select, .setting-row select { min-height: 34px; padding: 0 8px; border: 1px solid #e5ebe6; border-radius: 7px; background: white; color: #48584d; font-size: 9px; }
@@ -437,6 +466,10 @@ h1, h2, h3, p { margin-top: 0; }
   #tab-gpt .chat-composer input { font-size: 12px; }
   #weather-map { height: 52vh; min-height: 270px; }
   .alert-status-card { flex-wrap: wrap; }
+  .relief-grid { grid-template-columns: 1fr; }
+  .map-toolbar { flex-wrap: wrap; justify-content: flex-start; }
+  .map-layer-picker { flex: 1 1 100%; }
+  .map-layer-picker select { flex: 1; max-width: none; }
   .forecast-badge { margin-left: auto; }
   .setting-row select { font-size: 8px; }
   .footer { padding-bottom: 3px; }

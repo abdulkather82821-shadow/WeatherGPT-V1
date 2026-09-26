@@ -81,11 +81,14 @@ const state = {
   location: { ...DEFAULT_LOCATION }, weather: null, air: null, marine: null,
   weatherRequestId: 0, auxiliaryRequestId: 0, language: readStorage("wg-language", "en"),
   units: readStorage("wg-units", "celsius"), role: readStorage("wg-role", "general"),
-  savedLocations: readStorage("wg-locations", []), notifications: readStorage("wg-notifications", { rain: false, heat: false }),
+  savedLocations: readStorage("wg-locations", []), notifications: readStorage("wg-notifications", { rain: false, storm: false, wind: false, heat: false, cold: false }),
   notificationsEnabled: readStorage("wg-notifications-enabled", false),
   voiceResponses: readStorage("wg-voice-responses", false),
+  emailUser: null, emailPreferences: null, emailLocation: null, emailPreferenceRequestId: 0, emailLocationUpdatePending: false,
+  fieldCrop: readStorage("wg-field-crop", "general"), fieldStage: readStorage("wg-field-stage", "land-preparation"),
   mode: "general", currentTab: "home", forecastDays: 7, map: null, mapMarker: null, radarLayer: null,
-  radarFrames: null, radarLoaded: false, toastTimeout: null
+  mapWeatherMarkers: [], mapRequestId: 0, mapUpdateTimeout: null,
+  mapWeatherLayer: "temperature", radarFrames: null, radarLoaded: false, toastTimeout: null
 };
 const $ = (id) => document.getElementById(id);
 
@@ -197,6 +200,7 @@ function renderWeather(data) {
   updateMapLocation();
   updateAgriculturePanel(current, daily);
   checkNotificationRules(current, daily);
+  updateEmailLocationIfSubscribed();
 }
 
 function renderForecast(daily) {
@@ -273,6 +277,7 @@ function renderAdvisory(current, daily) {
   setText("feed-title", title);
   setText("feed-description", description);
   setText("feed-time", `Source: Open-Meteo forecast · ${new Date(current.time).toLocaleString(languageLocales[state.language] || "en-IN", { timeZone: state.location.timezone || "UTC" })} · not an official warning`);
+  updateCommunityGuidance(current, daily);
   const feedSeverity = $("feed-severity");
   setText("feed-severity", severity === "LOW" ? "ADVISORY" : severity);
   feedSeverity.className = `severity severity-${severity === "LOW" ? "advisory" : severity.toLowerCase()}`;
@@ -403,7 +408,19 @@ async function findLocation(query) {
 function addMessage(text, role, isError = false) {
   const message = document.createElement("div");
   message.className = `chat-message ${role}${isError ? " error" : ""}`;
-  message.textContent = text;
+  const content = document.createElement("span");
+  content.textContent = text;
+  message.append(content);
+  if (role === "assistant" && !isError) {
+    const replay = document.createElement("button");
+    replay.type = "button";
+    replay.className = "message-speak";
+    replay.textContent = "🔊";
+    replay.setAttribute("aria-label", "Read this answer aloud");
+    replay.title = "Read this answer aloud";
+    replay.addEventListener("click", () => speakAnswer(text));
+    message.append(replay);
+  }
   $("chat-messages").append(message);
   message.scrollIntoView({ behavior: "smooth", block: "nearest" });
   if (role === "assistant" && state.voiceResponses) speakAnswer(text);
@@ -522,6 +539,7 @@ function setActiveTab(tab) {
     window.setTimeout(() => {
       initializeMap();
       state.map?.invalidateSize();
+      scheduleWeatherMapUpdate();
     }, 40);
   }
   if (tab === "alerts" && state.weather) renderAdvisory(state.weather.current, state.weather.daily);
@@ -543,6 +561,7 @@ function initializeMap() {
   state.mapMarker = window.L.circleMarker([state.location.latitude, state.location.longitude], {
     radius: 8, color: "#fff", weight: 3, fillColor: "#3c9663", fillOpacity: 1
   }).addTo(state.map).bindPopup(`${safeText(state.location.name)} · WeatherGPT location`);
+  state.map.on("moveend", scheduleWeatherMapUpdate);
 }
 
 async function toggleRadarLayer(enabled) {
@@ -551,7 +570,10 @@ async function toggleRadarLayer(enabled) {
   if (!enabled) {
     if (state.radarLayer) state.map.removeLayer(state.radarLayer);
     state.radarLayer = null;
-    setText("map-legend", `Map centered on ${state.location.name} · OpenStreetMap`);
+    $("map-radar-toggle").setAttribute("aria-pressed", "false");
+    $("map-radar-toggle").innerHTML = "☂ <span>Show rain radar</span>";
+    setText("map-source", "Open-Meteo · model");
+    scheduleWeatherMapUpdate();
     return;
   }
   try {
@@ -568,20 +590,15 @@ async function toggleRadarLayer(enabled) {
       opacity: 0.7, maxZoom: 12, tileSize: 256, attribution: "&copy; RainViewer"
     }).addTo(state.map);
     const frameTime = new Date(frame.time * 1000).toLocaleTimeString(languageLocales[state.language] || "en-IN", { timeZone: state.location.timezone || "UTC", hour: "numeric", minute: "2-digit" });
-    $("map-legend").replaceChildren();
-    const dot = document.createElement("span");
-    dot.className = "legend-dot radar-legend-dot";
-    const text = document.createElement("span");
-    text.textContent = `Rain radar · ${frameTime} local · `;
-    const provider = document.createElement("strong");
-    provider.textContent = "RainViewer";
-    text.append(provider);
-    $("map-legend").append(dot, text);
+    $("map-radar-toggle").setAttribute("aria-pressed", "true");
+    $("map-radar-toggle").innerHTML = "☂ <span>Hide rain radar</span>";
+    setText("map-status", `Observed rain radar · ${frameTime} local · modelled ${mapLayerDefinitions[state.mapWeatherLayer].label} below`);
+    setText("map-source", "RainViewer + Open-Meteo");
   } catch (error) {
     console.error("Unable to load rainfall radar:", error);
     showToast("Live radar is temporarily unavailable.");
-    document.querySelector('[data-map-layer="radar"]').classList.remove("active");
-    document.querySelector('[data-map-layer="base"]').classList.add("active");
+    $("map-radar-toggle").setAttribute("aria-pressed", "false");
+    $("map-radar-toggle").innerHTML = "☂ <span>Show rain radar</span>";
   }
 }
 
@@ -591,6 +608,122 @@ function updateMapLocation() {
     state.map.setView([state.location.latitude, state.location.longitude], Math.max(state.map.getZoom(), 7));
     state.mapMarker.setLatLng([state.location.latitude, state.location.longitude]);
     state.mapMarker.setPopupContent(`${safeText(state.location.name)} · WeatherGPT location`);
+    scheduleWeatherMapUpdate();
+  }
+}
+
+const mapLayerDefinitions = {
+  temperature: { label: "Temperature", unit: "°C", field: "temperature_2m", colors: [-5, 5, 15, 25, 32, 40] },
+  condition: { label: "Weather condition", unit: "", field: "weather_code" },
+  precipitation: { label: "Rainfall", unit: "mm/h", field: "precipitation", colors: [0, 0.1, 1, 3, 8, 15] },
+  wind: { label: "Wind speed", unit: "km/h", field: "wind_speed_10m", colors: [5, 15, 25, 40, 60, 90] },
+  humidity: { label: "Humidity", unit: "%", field: "relative_humidity_2m", colors: [25, 40, 55, 70, 85, 100] },
+  cloud: { label: "Cloud cover", unit: "%", field: "cloud_cover", colors: [10, 25, 40, 60, 80, 100] },
+  pressure: { label: "Pressure", unit: "hPa", field: "pressure_msl", colors: [980, 995, 1005, 1015, 1025, 1040] },
+  visibility: { label: "Visibility", unit: "km", field: "visibility", colors: [1, 3, 5, 10, 20, 40] },
+  uv: { label: "UV index", unit: "", field: "uv_index", colors: [1, 3, 6, 8, 11, 15] },
+  aqi: { label: "Air quality · US AQI", unit: "AQI", field: "us_aqi", colors: [0, 50, 100, 150, 200, 300] }
+};
+
+function scheduleWeatherMapUpdate() {
+  if (!state.map || state.currentTab !== "map" || $("map-radar-toggle")?.getAttribute("aria-pressed") === "true") return;
+  clearTimeout(state.mapUpdateTimeout);
+  state.mapUpdateTimeout = window.setTimeout(loadWeatherMapGrid, 700);
+}
+
+function mapValueColor(value, thresholds) {
+  const colors = ["#3184a6", "#55a984", "#d2bd59", "#e49342", "#d45a48"];
+  let index = 0;
+  for (let i = 1; i < thresholds.length - 1; i += 1) {
+    if (value >= thresholds[i]) index = i;
+  }
+  return colors[index];
+}
+
+function formatMapValue(value, layer) {
+  if (layer === "condition") return getCondition(value).text;
+  const definition = mapLayerDefinitions[layer];
+  const digits = layer === "temperature" || layer === "precipitation" ? 1 : 0;
+  return `${Number(value).toFixed(digits)}${definition.unit ? ` ${definition.unit}` : ""}`;
+}
+
+function clearWeatherMapMarkers() {
+  state.mapWeatherMarkers.forEach((marker) => state.map?.removeLayer(marker));
+  state.mapWeatherMarkers = [];
+}
+
+function renderWeatherMapGrid(weatherPoints, airPoints = null) {
+  if (!state.map || !weatherPoints?.length) return;
+  const layer = state.mapWeatherLayer;
+  const definition = mapLayerDefinitions[layer];
+  clearWeatherMapMarkers();
+  weatherPoints.forEach((point, index) => {
+    const value = layer === "aqi" ? airPoints?.[index]?.current?.us_aqi : point.current?.[definition.field];
+    if (!Number.isFinite(Number(value))) return;
+    const condition = layer === "condition" ? getCondition(Number(value)) : null;
+    const marker = condition
+      ? window.L.marker([point.latitude, point.longitude], {
+        icon: window.L.divIcon({ className: "weather-condition-marker", html: `<span>${condition.icon}</span>`, iconSize: [32, 32], iconAnchor: [16, 16] })
+      })
+      : window.L.circleMarker([point.latitude, point.longitude], {
+        radius: 19, color: "#ffffff", weight: 1.5, fillColor: mapValueColor(Number(value), definition.colors), fillOpacity: 0.72
+      });
+    marker.bindTooltip(formatMapValue(Number(value), layer), { permanent: true, direction: "center", className: "weather-value-tooltip" });
+    marker.bindPopup(`${definition.label}: ${formatMapValue(Number(value), layer)}<br>Forecast grid point · Open-Meteo`);
+    marker.addTo(state.map);
+    state.mapWeatherMarkers.push(marker);
+  });
+  const time = weatherPoints[0]?.current?.time;
+  const localTime = time ? new Date(time).toLocaleString(languageLocales[state.language] || "en-IN", { timeZone: state.location.timezone || "UTC", hour: "numeric", minute: "2-digit" }) : "time unavailable";
+  const radarVisible = $("map-radar-toggle").getAttribute("aria-pressed") === "true";
+  setText("map-status", `${definition.label} at nearby forecast grid points · ${localTime} local · ${state.location.name}${radarVisible ? " · observed radar overlay" : ""}`);
+  setText("map-source", radarVisible ? "RainViewer + Open-Meteo" : layer === "aqi" ? "Open-Meteo · AQI model" : "Open-Meteo · forecast model");
+}
+
+async function loadWeatherMapGrid() {
+  if (!state.map || state.currentTab !== "map") return;
+  const requestId = ++state.mapRequestId;
+  const bounds = state.map.getBounds();
+  const latitude = [];
+  const longitude = [];
+  const rows = 4;
+  const columns = 4;
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      latitude.push((bounds.getNorth() - bounds.getSouth()) * (row + 0.5) / rows + bounds.getSouth());
+      longitude.push((bounds.getEast() - bounds.getWest()) * (column + 0.5) / columns + bounds.getWest());
+    }
+  }
+  setText("map-status", `Loading ${mapLayerDefinitions[state.mapWeatherLayer].label} grid for this map view…`);
+  try {
+    const weatherParams = new URLSearchParams({
+      latitude: latitude.join(","), longitude: longitude.join(","), timezone: "auto", forecast_days: "1",
+      wind_speed_unit: "kmh", precipitation_unit: "mm",
+      current: "temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,pressure_msl,cloud_cover,visibility,uv_index"
+    });
+    const weatherResponse = await fetch(`${API}?${weatherParams}`);
+    if (!weatherResponse.ok) throw new Error(`Weather grid service returned ${weatherResponse.status}`);
+    const weatherData = await weatherResponse.json();
+    const weatherPoints = Array.isArray(weatherData) ? weatherData : [weatherData];
+    if (weatherPoints.length !== latitude.length || weatherPoints.some((point) => !point.current)) throw new Error("Weather grid returned incomplete map data.");
+    let airPoints = null;
+    if (state.mapWeatherLayer === "aqi") {
+      const airParams = new URLSearchParams({
+        latitude: latitude.join(","), longitude: longitude.join(","), timezone: "auto", current: "us_aqi"
+      });
+      const airResponse = await fetch(`${AIR_API}?${airParams}`);
+      if (!airResponse.ok) throw new Error(`Air-quality grid service returned ${airResponse.status}`);
+      const airData = await airResponse.json();
+      airPoints = Array.isArray(airData) ? airData : [airData];
+      if (airPoints.length !== latitude.length) throw new Error("Air-quality grid returned incomplete map data.");
+    }
+    if (requestId !== state.mapRequestId || state.currentTab !== "map") return;
+    renderWeatherMapGrid(weatherPoints, airPoints);
+  } catch (error) {
+    if (requestId !== state.mapRequestId) return;
+    console.error("Unable to load the weather map grid:", error);
+    setText("map-status", `${mapLayerDefinitions[state.mapWeatherLayer].label} map data unavailable. Check your connection and retry.`);
+    showToast("Could not load weather data for the map.");
   }
 }
 
@@ -679,14 +812,72 @@ function drawClimateChart(chart, values, labels, bars) {
 
 function updateAgriculturePanel(current, daily) {
   const rain = daily.precipitation_probability_max?.[0] ?? 0;
-  const maxWind = Math.max(...(state.weather?.hourly?.wind_speed_10m?.slice(0, 24) || [current.wind_speed_10m]));
-  const rainMessage = rain >= 50 ? `Rain is likely today (${rain}%). Defer irrigation if your local field already has adequate soil moisture.` : `Rain chance today: ${rain}%. Irrigation timing still depends on crop stage, soil moisture and local field conditions.`;
-  const sprayMessage = rain >= 40 || maxWind >= 15 ? "Rain or wind could affect spray operations. Check your product label, current field conditions and a local agricultural adviser before spraying." : "The forecast has a relatively calm, lower-rain window today. Confirm wind, rain-free hours and the product label locally before any spray operation.";
+  const hourly = state.weather?.hourly;
+  const maxWind = Math.max(...(hourly?.wind_speed_10m?.slice(0, 24) || [current.wind_speed_10m]));
+  const expectedRain = daily.precipitation_sum?.[0] ?? 0;
+  const rainMessage = rain >= 50 || expectedRain >= 5 ? `Rain is possible today (${rain}% chance; about ${expectedRain.toFixed(1)} mm forecast). Check soil moisture before irrigation and avoid working on waterlogged fields.` : `Rain chance today: ${rain}% (${expectedRain.toFixed(1)} mm forecast). Irrigation still depends on soil moisture, crop stage and local field conditions.`;
+  const sprayMessage = rain >= 40 || maxWind >= 15 ? `Rain or forecast winds up to ${Math.round(maxWind)} km/h could affect spraying. Check the product label and local agricultural advice; do not spray in unsafe conditions.` : `Forecast wind is up to ${Math.round(maxWind)} km/h with a ${rain}% rain chance. Verify a suitable rain-free window, field conditions and the product label before any spray operation.`;
   const headline = state.role === "farmer" ? "Field forecast" : "Farm weather summary";
   const root = document.createElement("div");
-  root.innerHTML = `<span>🌾</span><div><strong>${headline} · ${safeText(state.location.name)}</strong><p>${safeText(rainMessage)} ${safeText(sprayMessage)} Weather guidance is not a substitute for professional agricultural advice.</p></div>`;
+  root.innerHTML = `<span>🌾</span><div><strong>${headline} · ${safeText(state.location.name)}</strong><p>${safeText(rainMessage)} ${safeText(sprayMessage)} General forecast planning only—not a crop-specific prescription.</p></div>`;
   const card = $("agriculture-summary");
   if (card) { card.replaceChildren(...root.childNodes); card.hidden = false; }
+  const planner = $("farmer-planner");
+  if (planner) {
+    planner.hidden = false;
+    renderFieldAdvice(current, daily);
+  }
+}
+
+function renderFieldAdvice(current = state.weather?.current, daily = state.weather?.daily) {
+  if (!current || !daily) return;
+  const rainChance = daily.precipitation_probability_max?.[0] ?? 0;
+  const rainAmount = daily.precipitation_sum?.[0] ?? 0;
+  const next24Wind = state.weather?.hourly?.wind_speed_10m?.slice(0, 24) || [current.wind_speed_10m];
+  const maxWind = Math.max(...next24Wind);
+  const maxTemperature = daily.temperature_2m_max?.[0] ?? current.temperature_2m;
+  const rainAdvice = rainChance >= 50 || rainAmount >= 5
+    ? `Rain is possible today (${rainChance}% chance; ${rainAmount.toFixed(1)} mm forecast). Check soil moisture before irrigation; delay field work on saturated ground.`
+    : `Rain chance is ${rainChance}% (${rainAmount.toFixed(1)} mm forecast). Base irrigation on field soil moisture and crop stage, not this forecast alone.`;
+  const sprayAdvice = rainChance >= 40 || maxWind >= 15
+    ? `Forecast rain or winds up to ${Math.round(maxWind)} km/h may make spraying unsuitable. Check label restrictions and consult a local extension adviser.`
+    : `Forecast wind is up to ${Math.round(maxWind)} km/h. Verify a rain-free window and the product label locally before spraying.`;
+  const stageAdvice = state.fieldStage === "harvest"
+    ? rainAmount >= 2 ? " Rain may affect harvesting or crop drying; protect harvested produce from moisture." : " Confirm the crop and ground are dry enough before harvest or storage."
+    : state.fieldStage === "sowing" || state.fieldStage === "land-preparation"
+      ? " Check seedbed moisture and drainage locally before field preparation or sowing."
+      : state.fieldStage === "flowering"
+        ? " Avoid treating a general weather forecast as a crop-stage stress threshold; ask your local KVK about crop-specific protection."
+        : " Check crop stage, drainage and soil moisture in the field before changing operations.";
+  const heatAdvice = maxTemperature >= 35 ? ` Forecast high is ${Math.round(maxTemperature)}°C. Plan strenuous outdoor field work for cooler hours, take water breaks and use shade.` : "";
+  const cropLabels = { general: "general crops", rice: "rice / paddy", millet: "millets", cotton: "cotton", pulses: "pulses", vegetables: "vegetables", other: "selected crop" };
+  const stageLabels = { "land-preparation": "land preparation", sowing: "sowing / planting", growing: "growing", flowering: "flowering", harvest: "harvest / drying" };
+  setText("field-advice", `${cropLabels[state.fieldCrop] || cropLabels.general} · ${stageLabels[state.fieldStage] || stageLabels["land-preparation"]}. ${rainAdvice}${sprayAdvice}${stageAdvice}${heatAdvice}`);
+}
+
+function updateCommunityGuidance(current, daily) {
+  const month = Number(new Intl.DateTimeFormat("en", { month: "numeric", timeZone: state.location.timezone || "UTC" }).format(new Date(current.time)));
+  const rainChance = daily.precipitation_probability_max?.[0] ?? 0;
+  const rainAmount = daily.precipitation_sum?.[0] ?? 0;
+  const high = daily.temperature_2m_max?.[0] ?? current.temperature_2m;
+  const wind = current.wind_speed_10m ?? 0;
+  const code = current.weather_code ?? 0;
+  const parts = [];
+  if (rainChance >= 60 || rainAmount >= 20 || code >= 95) parts.push("Rain or thunderstorms appear in the forecast. Keep essential medicines, drinking water, a torch and charged phone ready; avoid flooded roads, drains and electrical equipment in wet areas.");
+  if (high >= 35) parts.push("Hot conditions are forecast. Drink safe water, seek shade and check on older adults, children and people working outdoors.");
+  if (high <= 10) parts.push("Cold conditions are forecast. Keep warm and dry, especially children, older adults and people without adequate shelter.");
+  if (wind >= 40) parts.push("Strong winds are forecast. Stay clear of trees, unstable structures and loose outdoor objects; follow local authority instructions.");
+  if (!parts.length) parts.push("No major rain, heat or wind signal appears in this local forecast. Keep routine drinking water and medicines accessible and continue checking official local updates.");
+  const country = state.location.country.toLocaleLowerCase();
+  const seasonal = country.includes("india")
+    ? month >= 6 && month <= 9 ? "India monsoon season: keep drains clear where safe, store documents and medicines above expected water levels, and never walk or drive through floodwater."
+      : month >= 10 && month <= 12 ? "India post-monsoon season: watch official cyclone and heavy-rain updates, secure loose items, and identify the evacuation route provided by local authorities."
+        : month >= 3 && month <= 5 ? "India pre-monsoon / hot season: schedule outdoor work in cooler hours, drink safe water, and take heat breaks in shade."
+          : "India cooler season: keep warm clothing and essential medicines ready and continue following location-specific official advisories."
+    : "Seasonal conditions vary by region. Use the local forecast and follow preparedness instructions issued by your local authority.";
+  setText("seasonal-guidance", `${parts.join(" ")} ${seasonal}`);
+  setText("seasonal-guidance-source", `Local forecast for ${state.location.name} · Open-Meteo · ${new Date(current.time).toLocaleString(languageLocales[state.language] || "en-IN", { timeZone: state.location.timezone || "UTC" })}. General preparedness only, not an official warning or shelter listing.`);
+  setText("relief-farm-copy", `Field planner for ${state.location.name}: rain chance ${rainChance}%, expected precipitation ${rainAmount.toFixed(1)} mm, forecast high ${Math.round(high)}°C and current wind ${Math.round(wind)} km/h. Select a crop stage on Home; follow your local KVK or agriculture extension officer for crop-specific action.`);
 }
 
 async function loadMarineWeather() {
@@ -719,13 +910,14 @@ function createNativeNotification(title, body, notificationKey) {
   const stamp = new Date().toISOString().slice(0, 10);
   const key = `wg-sent-${notificationKey}-${state.location.latitude.toFixed(2)}-${stamp}`;
   if (localStorage.getItem(key)) return;
+  const notificationIds = { rain: 43001, storm: 43002, wind: 43003, heat: 43004, cold: 43005 };
   const schedule = async () => {
     try {
       const native = window.Capacitor?.Plugins?.LocalNotifications;
       if (native) {
         const permission = await native.requestPermissions();
         if (permission.display !== "granted") return;
-        await native.schedule({ notifications: [{ id: notificationKey === "rain" ? 43001 : 43002, title, body, schedule: { at: new Date(Date.now() + 1000) } }] });
+        await native.schedule({ notifications: [{ id: notificationIds[notificationKey] || 43009, title, body, schedule: { at: new Date(Date.now() + 1000) } }] });
       } else if ("Notification" in window && Notification.permission === "granted") {
         new Notification(title, { body, icon: "icon.svg" });
       } else return;
@@ -738,10 +930,22 @@ function createNativeNotification(title, body, notificationKey) {
 function checkNotificationRules(current, daily) {
   if (!state.notificationsEnabled) return;
   if (state.notifications.rain && (daily.precipitation_probability_max?.[0] ?? 0) >= 60) {
-    createNativeNotification("Rain in the forecast", `${state.location.name}: ${daily.precipitation_probability_max[0]}% chance of rain today. Forecast guidance only.`, "rain");
+    createNativeNotification("Rain in the forecast", `${state.location.name}: ${daily.precipitation_probability_max[0]}% chance of rain today. Forecast guidance only; not an official warning.`, "rain");
   }
-  if (state.notifications.heat && current.temperature_2m >= 35) {
-    createNativeNotification("Hot weather forecast", `${state.location.name}: ${Math.round(current.temperature_2m)}°C. Stay hydrated and check local official guidance.`, "heat");
+  if (state.notifications.storm && (current.weather_code ?? 0) >= 95) {
+    createNativeNotification("Thunderstorm conditions forecast", `${state.location.name}: the forecast indicates a thunderstorm. Follow official local alerts and safety instructions.`, "storm");
+  }
+  const maximumWind = Math.max(...(state.weather?.hourly?.wind_speed_10m?.slice(0, 24) || [current.wind_speed_10m || 0]));
+  if (state.notifications.wind && maximumWind >= 50) {
+    createNativeNotification("Strong winds in the forecast", `${state.location.name}: forecast winds reach about ${Math.round(maximumWind)} km/h. Check official local advisories.`, "wind");
+  }
+  const forecastHigh = daily.temperature_2m_max?.[0] ?? current.temperature_2m;
+  if (state.notifications.heat && forecastHigh >= 40) {
+    createNativeNotification("Extreme heat in the forecast", `${state.location.name}: forecast high ${Math.round(forecastHigh)}°C. Stay hydrated and follow local official guidance.`, "heat");
+  }
+  const forecastLow = daily.temperature_2m_min?.[0] ?? current.temperature_2m;
+  if (state.notifications.cold && forecastLow <= 5) {
+    createNativeNotification("Cold weather in the forecast", `${state.location.name}: forecast low ${Math.round(forecastLow)}°C. Check on people who may need extra warmth.`, "cold");
   }
 }
 
@@ -843,6 +1047,180 @@ async function enableNotifications() {
   } catch (error) {
     console.error("Unable to request notification permission:", error);
     showToast("Notification permission could not be requested.");
+  }
+}
+
+const emailPreferenceIds = {
+  rain: "email-rain-alert",
+  storm: "email-storm-alert",
+  wind: "email-wind-alert",
+  heat: "email-heat-alert",
+  cold: "email-cold-alert"
+};
+
+function selectedEmailCategories() {
+  return Object.fromEntries(Object.entries(emailPreferenceIds).map(([category, id]) => [category, $(id).checked]));
+}
+
+function showEmailStatus(message, isError = false) {
+  const element = $("email-alert-status");
+  element.textContent = message;
+  element.classList.toggle("error", isError);
+}
+
+async function handleEmailAuthState(user) {
+  const requestId = ++state.emailPreferenceRequestId;
+  state.emailUser = user;
+  const configured = window.WeatherGPTFirebase?.configured === true;
+  $("google-sign-in").disabled = !configured || Boolean(user);
+  $("google-sign-in").hidden = Boolean(user);
+  $("google-sign-out").hidden = !user;
+  $("email-alert-controls").hidden = !user;
+  $("email-account-address").textContent = user?.email || "";
+  if (!user) {
+    state.emailPreferences = null;
+    state.emailLocation = null;
+    Object.values(emailPreferenceIds).forEach((id) => { $(id).checked = false; });
+    $("email-alert-consent").checked = false;
+    setText("email-account-status", configured ? "Not signed in. Google sign-in is required to enable email alerts." : "Firebase project setup required before Google sign-in can be used.");
+    showEmailStatus(configured ? "Email alerts are off until you sign in and opt in." : "Email notifications are not configured yet.");
+    return;
+  }
+  if (!user.emailVerified) {
+    state.emailPreferences = null;
+    setText("email-account-status", "This Google account does not have a verified email address.");
+    $("email-alert-controls").hidden = true;
+    return;
+  }
+  setText("email-account-status", "Google account connected · verified email");
+  setText("email-alert-location", `${state.location.name} · ${state.location.latitude.toFixed(3)}, ${state.location.longitude.toFixed(3)}`);
+  try {
+    const preferences = await window.WeatherGPTFirebase.loadEmailPreferences();
+    if (requestId !== state.emailPreferenceRequestId || state.emailUser?.uid !== user.uid) return;
+    state.emailPreferences = preferences;
+    Object.entries(emailPreferenceIds).forEach(([category, id]) => {
+      $(id).checked = preferences?.categories?.[category] === true;
+    });
+    $("email-alert-consent").checked = preferences?.enabled === true;
+    if (preferences?.enabled) {
+      const previous = preferences.location;
+      state.emailLocation = previous ? { latitude: previous.latitude, longitude: previous.longitude } : null;
+      showEmailStatus("Email alerts are enabled for this verified account. Forecast guidance is not an official warning.");
+    } else {
+      state.emailLocation = null;
+      showEmailStatus("Choose alert types, tick the consent box, then save to enable emails.");
+    }
+    updateEmailLocationIfSubscribed();
+  } catch (error) {
+    if (requestId !== state.emailPreferenceRequestId) return;
+    console.error("Unable to load Firebase email preferences:", error);
+    showEmailStatus(error instanceof Error ? `Could not load email settings: ${error.message}` : "Could not load email settings.", true);
+  }
+}
+
+async function initializeFirebaseEmail() {
+  const firebase = window.WeatherGPTFirebase;
+  if (!firebase) {
+    $("google-sign-in").disabled = true;
+    setText("email-account-status", "Firebase sign-in is unavailable in this build.");
+    return;
+  }
+  if (!firebase.configured) {
+    $("google-sign-in").disabled = true;
+    setText("email-account-status", "Firebase project setup required before Google sign-in can be used.");
+    showEmailStatus("Add your Firebase web app configuration, enable Google Authentication, and add Android SHA-1 fingerprints.");
+    return;
+  }
+  $("google-sign-in").disabled = true;
+  setText("email-account-status", "Connecting to Firebase Authentication…");
+  try {
+    await firebase.initialize(handleEmailAuthState);
+    $("google-sign-in").disabled = Boolean(state.emailUser);
+  } catch (error) {
+    console.error("Firebase Authentication initialization failed:", error);
+    $("google-sign-in").disabled = true;
+    setText("email-account-status", error instanceof Error ? `Firebase setup error: ${error.message}` : "Firebase setup failed.");
+    showEmailStatus("Google sign-in could not be initialized. Check the Firebase project configuration and Android setup.", true);
+  }
+}
+
+async function saveEmailAlertPreferences() {
+  const user = state.emailUser;
+  const button = $("save-email-alerts");
+  if (!user || !user.emailVerified) {
+    showEmailStatus("Sign in with a verified Google account before saving email alerts.", true);
+    return;
+  }
+  if (!state.weather) {
+    showEmailStatus("Wait for the forecast for your selected location to load before saving email preferences.", true);
+    return;
+  }
+  const categories = selectedEmailCategories();
+  const consent = $("email-alert-consent").checked;
+  if (consent && !Object.values(categories).some(Boolean)) {
+    showEmailStatus("Select at least one available email alert type or leave email consent off.", true);
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "Saving email preferences…";
+  try {
+    const result = await window.WeatherGPTFirebase.saveEmailPreferences({ consent, categories, location: state.location });
+    state.emailPreferences = { enabled: result.enabled, categories, location: { ...state.location } };
+    state.emailLocation = result.enabled ? { latitude: state.location.latitude, longitude: state.location.longitude } : null;
+    showEmailStatus(result.enabled
+      ? `Forecast email alerts enabled for ${result.email}. You can disable them here at any time.`
+      : "Email alerts are off. Your preferences were saved.");
+  } catch (error) {
+    console.error("Unable to save Firebase email preferences:", error);
+    showEmailStatus(error instanceof Error ? `Could not save email preferences: ${error.message}` : "Could not save email preferences.", true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Save email alert preferences";
+  }
+}
+
+function updateEmailLocationIfSubscribed() {
+  const user = state.emailUser;
+  const previous = state.emailLocation;
+  if (!user?.emailVerified || !state.emailPreferences?.enabled || !state.weather || state.emailLocationUpdatePending) return;
+  if (previous?.latitude === state.location.latitude && previous?.longitude === state.location.longitude) return;
+  state.emailLocationUpdatePending = true;
+  setText("email-alert-location", `${state.location.name} · ${state.location.latitude.toFixed(3)}, ${state.location.longitude.toFixed(3)}`);
+  window.WeatherGPTFirebase.saveEmailPreferences({
+    consent: true,
+    categories: state.emailPreferences.categories,
+    location: state.location
+  }).then(() => {
+    state.emailPreferences = { ...state.emailPreferences, location: { ...state.location } };
+    state.emailLocation = { latitude: state.location.latitude, longitude: state.location.longitude };
+    showEmailStatus(`Saved forecast email location: ${state.location.name}.`);
+  }).catch((error) => {
+    console.error("Unable to update the subscribed forecast location:", error);
+    showEmailStatus(error instanceof Error ? `Email location was not updated: ${error.message}` : "Email location was not updated.", true);
+  }).finally(() => {
+    state.emailLocationUpdatePending = false;
+  });
+}
+
+async function signOutFromEmailAlerts() {
+  const user = state.emailUser;
+  if (!user) return;
+  const button = $("google-sign-out");
+  button.disabled = true;
+  try {
+    if (state.emailPreferences?.enabled) {
+      await window.WeatherGPTFirebase.saveEmailPreferences({
+        consent: false,
+        categories: selectedEmailCategories(),
+        location: state.location
+      });
+    }
+    await window.WeatherGPTFirebase.signOut();
+  } catch (error) {
+    console.error("Unable to safely sign out of Google email alerts:", error);
+    showEmailStatus(error instanceof Error ? `Sign-out failed: ${error.message}` : "Sign-out failed.", true);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1000,22 +1378,38 @@ function setupVoice() {
   const native = window.Capacitor?.Plugins?.SpeechRecognition;
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   const buttons = [$("voice-button"), $("home-voice-button")].filter(Boolean);
+  $("home-voice-button").addEventListener("click", () => {
+    setActiveTab("gpt");
+    startVoiceInput();
+  });
   if (!native && !SpeechRecognition) {
-    buttons.forEach((button) => button.addEventListener("click", () => showToast("Voice input is not supported on this device. Try the text chat.")));
+    $("voice-button").addEventListener("click", () => showToast("Voice input is not supported on this device. Try typing your question."));
+    setText("voice-status", "Voice input is not available on this device. You can type a weather question, and use Read answers aloud in Profile if supported.");
     return;
   }
   if (SpeechRecognition) {
     state.browserRecognition = new SpeechRecognition();
     state.browserRecognition.interimResults = false;
-    state.browserRecognition.onstart = () => buttons.forEach((button) => button.classList.add("listening"));
-    state.browserRecognition.onend = () => buttons.forEach((button) => button.classList.remove("listening"));
+    state.browserRecognition.onstart = () => {
+      buttons.forEach((button) => button.classList.add("listening"));
+      setText("voice-status", `Listening in ${languageLocales[state.language] || "English"}… Speak your weather question now.`);
+    };
+    state.browserRecognition.onend = () => {
+      buttons.forEach((button) => button.classList.remove("listening"));
+      if (state.browserRecognition) $("voice-button").setAttribute("aria-pressed", "false");
+    };
     state.browserRecognition.onerror = (event) => {
       buttons.forEach((button) => button.classList.remove("listening"));
+      setText("voice-status", "Voice input stopped. Check microphone permission or network availability, then try again.");
       showToast(event.error === "not-allowed" ? "Microphone access was denied. Allow microphone access to use voice input." : "Voice input ended. Please try again.");
     };
-    state.browserRecognition.onresult = (event) => sendQuestion(event.results[0][0].transcript);
+    state.browserRecognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setText("voice-status", `Heard: “${transcript}” · Getting the local forecast…`);
+      sendQuestion(transcript);
+    };
   }
-  buttons.forEach((button) => button.addEventListener("click", startVoiceInput));
+  $("voice-button").addEventListener("click", startVoiceInput);
 }
 
 async function startVoiceInput() {
@@ -1031,21 +1425,32 @@ async function startVoiceInput() {
         const requested = await native.requestPermissions();
         if (requested.speechRecognition !== "granted") throw new Error("Microphone or speech recognition permission was denied.");
       }
-      button?.classList.add("listening");
+      [button, $("home-voice-button")].filter(Boolean).forEach((item) => item.classList.add("listening"));
+      button?.setAttribute("aria-pressed", "true");
+      setText("voice-status", `Listening in ${language}… Speak your weather question now.`);
       const result = await native.start({ language, maxResults: 1, popup: true, partialResults: false, prompt: "Ask WeatherGPT" });
-      button?.classList.remove("listening");
+      [button, $("home-voice-button")].filter(Boolean).forEach((item) => item.classList.remove("listening"));
+      button?.setAttribute("aria-pressed", "false");
       const transcript = result.matches?.[0]?.trim();
-      if (transcript) await sendQuestion(transcript);
-      else showToast("No speech was recognized. Try again.");
+      if (transcript) {
+        setText("voice-status", `Heard: “${transcript}” · Getting the local forecast…`);
+        await sendQuestion(transcript);
+      } else {
+        setText("voice-status", "No speech was recognized. Try again in a quieter place or type your question.");
+        showToast("No speech was recognized. Try again.");
+      }
       return;
     }
     if (state.browserRecognition) {
       state.browserRecognition.lang = language;
+      button?.setAttribute("aria-pressed", "true");
       state.browserRecognition.start();
     }
   } catch (error) {
-    button?.classList.remove("listening");
+    [button, $("home-voice-button")].filter(Boolean).forEach((item) => item.classList.remove("listening"));
+    button?.setAttribute("aria-pressed", "false");
     console.error("Voice input could not start:", error);
+    setText("voice-status", error instanceof Error ? error.message : "Voice input could not start.");
     showToast(error instanceof Error ? error.message : "Voice input could not start.");
   }
 }
@@ -1053,12 +1458,19 @@ async function startVoiceInput() {
 function initialize() {
   if (!Array.isArray(state.savedLocations)) state.savedLocations = [];
   if (!state.location || !Number.isFinite(Number(state.location.latitude)) || !Number.isFinite(Number(state.location.longitude))) state.location = { ...DEFAULT_LOCATION };
-  if (!state.notifications || typeof state.notifications !== "object") state.notifications = { rain: false, heat: false };
+  if (!state.notifications || typeof state.notifications !== "object") state.notifications = { rain: false, storm: false, wind: false, heat: false, cold: false };
+  if (!Object.hasOwn(mapLayerDefinitions, state.mapWeatherLayer)) state.mapWeatherLayer = "temperature";
+  if (!["general", "rice", "millet", "cotton", "pulses", "vegetables", "other"].includes(state.fieldCrop)) state.fieldCrop = "general";
+  if (!["land-preparation", "sowing", "growing", "flowering", "harvest"].includes(state.fieldStage)) state.fieldStage = "land-preparation";
   $("profile-role").value = state.role;
   $("profile-language").value = state.language;
   $("unit-select").value = state.units;
-  $("rain-notifications").checked = Boolean(state.notifications.rain);
-  $("heat-notifications").checked = Boolean(state.notifications.heat);
+  $("field-crop").value = state.fieldCrop;
+  $("field-stage").value = state.fieldStage;
+  $("weather-layer-select").value = state.mapWeatherLayer;
+  for (const category of ["rain", "storm", "wind", "heat", "cold"]) {
+    $(`${category}-notifications`).checked = Boolean(state.notifications[category]);
+  }
   $("voice-responses").checked = Boolean(state.voiceResponses);
   setLanguage(state.language);
   $("today-date").textContent = new Intl.DateTimeFormat(languageLocales[state.language] || "en-IN", { weekday: "long", month: "short", day: "numeric" }).format(new Date());
@@ -1071,6 +1483,20 @@ function initialize() {
   $("profile-language").addEventListener("change", (event) => setLanguage(event.target.value));
   $("profile-role").addEventListener("change", (event) => setWeatherRole(event.target.value));
   $("unit-select").addEventListener("change", (event) => setTemperatureUnit(event.target.value));
+  $("field-crop").addEventListener("change", (event) => {
+    state.fieldCrop = event.target.value;
+    storeValue("wg-field-crop", state.fieldCrop);
+    renderFieldAdvice();
+  });
+  $("field-stage").addEventListener("change", (event) => {
+    state.fieldStage = event.target.value;
+    storeValue("wg-field-stage", state.fieldStage);
+    renderFieldAdvice();
+  });
+  $("open-field-planner").addEventListener("click", () => {
+    setActiveTab("home");
+    window.setTimeout(() => $("farmer-planner").scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+  });
   $("add-location").addEventListener("click", promptForLocation);
   $("edit-location").addEventListener("click", promptForLocation);
   $("saved-place").addEventListener("click", () => setActiveTab("profile"));
@@ -1083,16 +1509,29 @@ function initialize() {
     state.voiceResponses = event.target.checked;
     storeValue("wg-voice-responses", state.voiceResponses);
   });
-  $("rain-notifications").addEventListener("change", (event) => {
-    state.notifications.rain = event.target.checked;
-    storeValue("wg-notifications", state.notifications);
-    if (event.target.checked) showToast("Choose Enable notifications to allow alerts on this device.");
+  for (const category of ["rain", "storm", "wind", "heat", "cold"]) {
+    $(`${category}-notifications`).addEventListener("change", (event) => {
+      state.notifications[category] = event.target.checked;
+      storeValue("wg-notifications", state.notifications);
+      if (event.target.checked) showToast("Choose Enable on-device notifications to allow weather alerts on this device.");
+    });
+  }
+  $("google-sign-in").addEventListener("click", async () => {
+    const button = $("google-sign-in");
+    button.disabled = true;
+    setText("email-account-status", "Opening Google sign-in…");
+    try {
+      await window.WeatherGPTFirebase.signInWithGoogle();
+    } catch (error) {
+      console.error("Google sign-in failed:", error);
+      setText("email-account-status", error instanceof Error ? `Google sign-in failed: ${error.message}` : "Google sign-in failed.");
+      showEmailStatus("Sign-in was not completed. Check Google provider settings, Firebase config and Android SHA-1 fingerprints.", true);
+    } finally {
+      button.disabled = !window.WeatherGPTFirebase?.configured || Boolean(state.emailUser);
+    }
   });
-  $("heat-notifications").addEventListener("change", (event) => {
-    state.notifications.heat = event.target.checked;
-    storeValue("wg-notifications", state.notifications);
-    if (event.target.checked) showToast("Choose Enable notifications to allow alerts on this device.");
-  });
+  $("google-sign-out").addEventListener("click", signOutFromEmailAlerts);
+  $("save-email-alerts").addEventListener("click", saveEmailAlertPreferences);
   $("location-search-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const query = $("location-search-input").value.trim();
@@ -1106,10 +1545,15 @@ function initialize() {
     if (state.map) state.map.setView([state.location.latitude, state.location.longitude], 9);
     else setActiveTab("map");
   });
-  document.querySelectorAll("[data-map-layer]").forEach((button) => button.addEventListener("click", () => {
-    document.querySelectorAll("[data-map-layer]").forEach((layer) => layer.classList.toggle("active", layer === button));
-    toggleRadarLayer(button.dataset.mapLayer === "radar");
-  }));
+  $("weather-layer-select").addEventListener("change", (event) => {
+    state.mapWeatherLayer = event.target.value;
+    clearWeatherMapMarkers();
+    if (state.currentTab === "map") loadWeatherMapGrid();
+  });
+  $("map-radar-toggle").addEventListener("click", () => {
+    const enabled = $("map-radar-toggle").getAttribute("aria-pressed") !== "true";
+    toggleRadarLayer(enabled);
+  });
   document.querySelectorAll("[data-tab-target]").forEach((button) => button.addEventListener("click", () => setActiveTab(button.dataset.tabTarget)));
   document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
   $("forecast-range").addEventListener("click", () => {
@@ -1129,6 +1573,7 @@ function initialize() {
   renderSavedLocations();
   setWeatherRole(state.role);
   setupVoice();
+  initializeFirebaseEmail();
   loadWeather();
   window.setInterval(loadWeather, 15 * 60 * 1000);
   if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || window.Capacitor)) {

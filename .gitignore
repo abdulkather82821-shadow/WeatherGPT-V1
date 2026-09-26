@@ -5,3 +5,7 @@ android/local.properties
 android/build/
 android/app/build/
 www/
+firebase-config.js
+android/app/google-services.json
+functions/.env*
+service-account*.json

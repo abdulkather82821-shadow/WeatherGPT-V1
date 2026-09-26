@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f4f7f3">
     <meta name="description" content="WeatherGPT brings forecasts, weather guidance and climate context into one friendly conversation.">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com/recaptcha/ https://www.google.com/recaptcha/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https://*.tile.openstreetmap.org https://*.rainviewer.com https://fonts.gstatic.com https://www.google.com; connect-src 'self' https://api.open-meteo.com https://geocoding-api.open-meteo.com https://archive-api.open-meteo.com https://air-quality-api.open-meteo.com https://marine-api.open-meteo.com https://api.rainviewer.com https://*.tile.openstreetmap.org https://*.googleapis.com https://*.firebaseapp.com https://*.firebaseio.com https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firebaseinstallations.googleapis.com https://firebaseappcheck.googleapis.com https://recaptchaenterprise.googleapis.com https://www.google.com https://www.gstatic.com; frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://www.google.com https://recaptcha.google.com; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests">
+    <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
+    <meta http-equiv="Permissions-Policy" content="camera=(), microphone=(self), geolocation=(self), payment=(), usb=()">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <title>WeatherGPT — Weather, in conversation</title>
@@ -140,6 +143,19 @@
         </section>
 
         <section class="agriculture-summary" id="agriculture-summary" hidden></section>
+        <section class="farmer-planner settings-card" id="farmer-planner" hidden>
+          <div class="feed-heading"><div><p class="eyebrow">FIELD PLANNING · FORECAST GUIDANCE</p><h2>Farmer field planner</h2></div><span class="source-chip">Open-Meteo</span></div>
+          <div class="field-planner-controls">
+            <label>Crop
+              <select id="field-crop"><option value="general">General / not selected</option><option value="rice">Rice / paddy</option><option value="millet">Millets</option><option value="cotton">Cotton</option><option value="pulses">Pulses</option><option value="vegetables">Vegetables</option><option value="other">Other crop</option></select>
+            </label>
+            <label>Crop stage
+              <select id="field-stage"><option value="land-preparation">Land preparation</option><option value="sowing">Sowing / planting</option><option value="growing">Growing</option><option value="flowering">Flowering</option><option value="harvest">Harvest / drying</option></select>
+            </label>
+          </div>
+          <div class="field-advice" id="field-advice" aria-live="polite">Load the local forecast for field-planning guidance.</div>
+          <p class="field-disclaimer">General weather planning only—not a crop-specific prescription. Check field and soil conditions, product labels, and advice from your local Krishi Vigyan Kendra (KVK) or agriculture extension officer before acting. <a href="https://kvk.icar.gov.in/" target="_blank" rel="noopener noreferrer">Find ICAR KVK resources ↗</a></p>
+        </section>
         <section class="insight-row">
           <article class="advisory-card" id="advisory-card">
             <div class="advisory-icon">✳</div>
@@ -166,21 +182,22 @@
           </div>
           <div class="chat-messages" id="chat-messages" aria-live="polite"></div>
           <form class="chat-composer" id="chat-form">
-            <button class="composer-tool" id="voice-button" type="button" aria-label="Use voice input" title="Use voice input">♩</button>
+            <button class="composer-tool" id="voice-button" type="button" aria-label="Start voice question" title="Speak a weather question">🎙</button>
             <input id="chat-input" type="text" autocomplete="off" data-i18n-placeholder="askPlaceholder" placeholder="Ask anything about the weather…" aria-label="Ask WeatherGPT">
             <span class="composer-shortcut" aria-hidden="true">↵</span>
             <button class="send-button" type="submit" aria-label="Send message">↑</button>
           </form>
+          <p class="voice-helper" id="voice-status" aria-live="polite">Voice helper: tap the microphone, ask in your selected language, then WeatherGPT will answer with the local forecast. Turn on “Read answers aloud” in Profile to hear replies.</p>
           <p class="disclaimer" data-i18n="dataDisclaimer">Weather data from Open-Meteo. Forecasts are guidance, not official emergency alerts.</p>
         </section>
         </div>
 
         <div class="tab-panel" id="tab-map">
-          <section class="tab-intro"><p class="eyebrow">LIVE LOCATION MAP</p><h1>Weather map</h1><p>Explore your location and view current radar imagery where available.</p></section>
+          <section class="tab-intro"><p class="eyebrow">LIVE LOCATION MAP</p><h1>Weather map</h1><p>Explore modelled current weather conditions around the map and observed rain radar where available.</p></section>
           <section class="map-card">
-            <div class="map-toolbar"><div class="mode-options map-layers" role="group" aria-label="Map layer"><button class="mode-option active" type="button" data-map-layer="base">Map</button><button class="mode-option" type="button" data-map-layer="radar">Rain radar</button></div><button id="map-recenter" class="map-recenter" type="button">⌖ <span>My location</span></button></div>
-            <div id="weather-map" aria-label="Interactive weather and rainfall radar map"></div>
-            <div class="map-legend" id="map-legend"><span class="legend-dot"></span><span>Map centered on <strong id="map-location">New Delhi</strong></span><span class="source-chip">OpenStreetMap</span></div>
+            <div class="map-toolbar"><label class="map-layer-picker" for="weather-layer-select">Weather layer<select id="weather-layer-select"><option value="temperature">Temperature</option><option value="condition">Weather condition</option><option value="precipitation">Rainfall</option><option value="wind">Wind speed</option><option value="humidity">Humidity</option><option value="cloud">Cloud cover</option><option value="pressure">Pressure</option><option value="visibility">Visibility</option><option value="uv">UV index</option><option value="aqi">Air quality (US AQI)</option></select></label><button id="map-radar-toggle" class="map-recenter" type="button" aria-pressed="false">☂ <span>Show rain radar</span></button><button id="map-recenter" class="map-recenter" type="button">⌖ <span>My location</span></button></div>
+            <div id="weather-map" aria-label="Interactive weather map with live modelled weather data and optional observed rain radar"></div>
+            <div class="map-legend" id="map-legend"><span class="legend-dot"></span><span id="map-status">Loading local weather grid…</span><span class="source-chip" id="map-source">Open-Meteo · model</span></div>
           </section>
           <section class="map-note"><span>ⓘ</span><div><strong>About this map</strong><p>The street map uses OpenStreetMap. Rain radar tiles, when available, are courtesy of RainViewer. A radar overlay shows observed precipitation, not a forecast or government warning.</p></div></section>
         </div>
@@ -194,6 +211,27 @@
             <article class="feed-item"><span class="feed-icon">☂</span><div><strong id="feed-title">Loading forecast guidance…</strong><p id="feed-description">Live forecast data will appear here.</p><small id="feed-time">Source: Open-Meteo forecast · not an official warning</small></div><span id="feed-severity" class="severity severity-advisory">ADVISORY</span></article>
             <article class="feed-item official-item"><span class="feed-icon">◎</span><div><strong>Official alerts: source not connected</strong><p>WeatherGPT does not receive verified IMD, CWC, or government disaster alerts yet. For emergency instructions, follow your local authorities.</p><a href="https://mausam.imd.gov.in/" target="_blank" rel="noopener noreferrer">Visit India Meteorological Department ↗</a></div><span class="severity official-badge">OFFICIAL SOURCE</span></article>
             <article class="feed-item"><span class="feed-icon">🌊</span><div><strong>Flood, cyclone and coastal warnings</strong><p>River levels, flood-risk maps and official cyclone tracks are not connected. Do not treat a missing alert as an all-clear.</p><a href="https://ndma.gov.in/" target="_blank" rel="noopener noreferrer">Visit National Disaster Management Authority ↗</a></div><span class="severity official-badge">PREPAREDNESS</span></article>
+          </section>
+          <section class="relief-center" aria-labelledby="relief-heading">
+            <div class="tab-intro relief-intro"><p class="eyebrow">COMMUNITY PREPAREDNESS</p><h2 id="relief-heading">Farmers, volunteers &amp; relief help</h2><p>Weather-based preparation guidance. Local shelter and food availability must be confirmed by district officials.</p></div>
+            <div class="relief-grid">
+              <article class="relief-card">
+                <span class="relief-icon">🌾</span><div><h3>Farmer &amp; field advisory</h3><p id="relief-farm-copy">Check the field planner on Home for rainfall, wind and temperature guidance. Follow your local KVK or agriculture extension officer for crop-specific action.</p><button class="relief-action" id="open-field-planner" type="button">Open farmer field planner</button></div>
+              </article>
+              <article class="relief-card">
+                <span class="relief-icon">🤝</span><div><h3>Volunteer safely</h3><p>Coordinate through your district administration, local disaster-management authority or an established relief organization. Do not enter floodwater, damaged buildings or restricted areas; never self-deploy into an active emergency.</p><a class="relief-action" href="https://ndma.gov.in/" target="_blank" rel="noopener noreferrer">Contact official disaster-management channels ↗</a></div>
+              </article>
+              <article class="relief-card">
+                <span class="relief-icon">🏠</span><div><h3>Shelter &amp; accommodation</h3><p>This app has no verified live shelter directory or bed availability. During an evacuation, follow official instructions and confirm an open relief centre with district officials, your panchayat or local emergency services before travelling.</p><a class="relief-action" href="https://sachet.ndma.gov.in/" target="_blank" rel="noopener noreferrer">Check NDMA Sachet updates ↗</a></div>
+              </article>
+              <article class="relief-card">
+                <span class="relief-icon">🥫</span><div><h3>Food &amp; safe water</h3><p>Keep drinking water in clean, covered containers and use sealed, shelf-stable food. Do not eat food or drink water touched by floodwater; follow local public-health boil-water or distribution instructions. Do not assume a relief kitchen is open unless officials confirm.</p><a class="relief-action" href="https://ndma.gov.in/" target="_blank" rel="noopener noreferrer">Official preparedness guidance ↗</a></div>
+              </article>
+              <article class="relief-card seasonal-guidance">
+                <span class="relief-icon">⛅</span><div><h3>Seasonal safety for your area</h3><p id="seasonal-guidance">Load the forecast for location-specific weather planning guidance.</p><small id="seasonal-guidance-source">Guidance is based on the Open-Meteo forecast, not an official warning.</small></div>
+              </article>
+            </div>
+            <p class="emergency-note"><strong>Immediate danger in India?</strong> Call <a href="tel:112">112 (Emergency Response Support System)</a> when safe to do so. This app does not dispatch responders or confirm rescue, shelter or food availability.</p>
           </section>
         </div>
 
@@ -214,9 +252,36 @@
             <label class="setting-row"><span><strong>Language</strong><small>Dashboard, forecasts and voice input</small></span><select id="profile-language"><option value="en">English</option><option value="hi">हिन्दी</option><option value="bn">বাংলা</option><option value="ta">தமிழ்</option><option value="te">తెలుగు</option><option value="mr">मराठी</option><option value="kn">ಕನ್ನಡ</option><option value="ml">മലയാളം</option><option value="gu">ગુજરાતી</option><option value="pa">ਪੰਜਾਬੀ</option><option value="ur">اردو</option></select></label>
           </section>
           <section class="settings-card location-settings"><div class="feed-heading"><div><p class="eyebrow">FORECAST LOCATIONS</p><h2>Saved places</h2></div><button class="action-button" id="save-current-location" type="button">＋ Save this place</button></div><div id="saved-locations-list"></div><button class="action-button compare-button" id="compare-saved-locations" type="button">Compare saved places</button><div id="locations-compare" class="locations-compare" aria-live="polite"></div><button class="location-search-button" id="profile-add-location" type="button">⌕ Search for a city, district or village</button><button class="location-search-button" id="use-my-location" type="button">◎ Use my current location</button></section>
-          <section class="settings-card notification-settings"><div><p class="eyebrow">PERSONAL WEATHER ALERTS</p><h2>Notifications</h2><p>Local notifications on this device · No SMS or email service connected</p></div><label class="toggle-row"><input id="rain-notifications" type="checkbox"><span>Notify me when rain is likely</span></label><label class="toggle-row"><input id="heat-notifications" type="checkbox"><span>Notify me during extreme heat (35°C+)</span></label><button class="action-button" id="enable-notifications" type="button">Enable notifications</button></section>
+          <section class="settings-card notification-settings">
+            <div><p class="eyebrow">ON-DEVICE ALERTS</p><h2>Weather notifications</h2><p>Opt in to alerts while this app is running. These use Open-Meteo forecast guidance and are not official disaster warnings.</p></div>
+            <label class="toggle-row"><input id="rain-notifications" type="checkbox"><span>Rain / heavy rain forecast</span></label>
+            <label class="toggle-row"><input id="storm-notifications" type="checkbox"><span>Thunderstorm forecast</span></label>
+            <label class="toggle-row"><input id="wind-notifications" type="checkbox"><span>Strong wind forecast (50 km/h+)</span></label>
+            <label class="toggle-row"><input id="heat-notifications" type="checkbox"><span>Extreme heat forecast (40°C+)</span></label>
+            <label class="toggle-row"><input id="cold-notifications" type="checkbox"><span>Cold weather forecast (5°C or lower)</span></label>
+            <button class="action-button" id="enable-notifications" type="button">Enable on-device notifications</button>
+          </section>
+          <section class="settings-card email-alert-settings">
+            <p class="eyebrow">EMAIL DISASTER &amp; WEATHER ALERTS</p><h2>Google sign-in &amp; email</h2>
+            <p>Sign in with Google to receive forecast-triggered messages at your verified account email. No email is sent until you opt in and save alert preferences.</p>
+            <div class="email-account-row"><span id="email-account-status" aria-live="polite">Firebase project setup required before Google sign-in can be used.</span><button class="action-button" id="google-sign-in" type="button" disabled>Continue with Google</button><button class="location-search-button" id="google-sign-out" type="button" hidden>Sign out</button></div>
+            <div id="email-alert-controls" hidden>
+              <p class="email-address-label">Signed in as <strong id="email-account-address"></strong></p>
+              <label class="toggle-row"><input id="email-rain-alert" type="checkbox"><span>Heavy rain forecast</span></label>
+              <label class="toggle-row"><input id="email-storm-alert" type="checkbox"><span>Thunderstorms forecast</span></label>
+              <label class="toggle-row"><input id="email-wind-alert" type="checkbox"><span>Strong winds (50 km/h+)</span></label>
+              <label class="toggle-row"><input id="email-heat-alert" type="checkbox"><span>Extreme heat (40°C+)</span></label>
+              <label class="toggle-row"><input id="email-cold-alert" type="checkbox"><span>Cold weather (5°C or lower)</span></label>
+              <label class="toggle-row unavailable-alert"><input type="checkbox" disabled><span>Flood alerts — unavailable until an official flood-warning feed is connected</span></label>
+              <label class="email-consent"><input id="email-alert-consent" type="checkbox"><span>I opt in to forecast emails at this verified Google email address, using the location shown below. I understand these are model guidance, not official warnings.</span></label>
+              <p class="email-location-note">Alert location: <strong id="email-alert-location">Waiting for weather location…</strong>. Change your saved weather location to update it. Email checks run on the configured Firebase server every 15 minutes.</p>
+              <button class="action-button" id="save-email-alerts" type="button">Save email alert preferences</button>
+              <p class="email-alert-status" id="email-alert-status" aria-live="polite"></p>
+            </div>
+            <p class="email-provider-note">Email sending requires your Firebase project plus an approved Resend sender address/API key. Server email secrets belong in Firebase Secret Manager—not in this app or source control.</p>
+          </section>
           <section class="settings-card voice-settings"><p class="eyebrow">VOICE ACCESSIBILITY</p><h2>Voice responses</h2><p>Speak WeatherGPT answers using your Android or browser text-to-speech engine.</p><label class="toggle-row"><input id="voice-responses" type="checkbox"><span>Read answers aloud</span></label></section>
-          <section class="settings-card limitations-card"><strong>Data source transparency</strong><p>Live forecast, geocoding, air-quality and historical information are retrieved from Open-Meteo. Rain radar imagery is supplied by RainViewer. Official government alerts, GFS/WRF selection, METAR/TAF, river levels, and SMS/email push services are not yet integrated.</p></section>
+          <section class="settings-card limitations-card"><strong>Data source transparency</strong><p>Live forecast, geocoding, air-quality and historical information are retrieved from Open-Meteo. Rain radar imagery is supplied by RainViewer. Verified official storm/flood alert feeds, GFS/WRF, METAR/TAF, river levels, and app push services are not yet integrated. Email alerts, once configured, are forecast guidance—not official alerts.</p></section>
         </div>
         <footer class="footer"><span>WeatherGPT <span class="footer-dot">·</span> <span data-i18n="builtForEveryone">Weather intelligence for everyone</span></span><span><span class="footer-live"></span><span data-i18n="servicesOperational">Weather services operational</span></span></footer>
       </main>
@@ -238,6 +303,8 @@
       </form>
     </dialog>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="firebase-config.js"></script>
+    <script src="firebase-client.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

@@ -9,19 +9,23 @@
     "android:sync": "npm run build:web && cap sync android",
     "android:open": "cap open android",
     "android:run": "cap run android",
-    "start": "node scripts/server.mjs",
-    "check": "node --check app.js"
+    "start": "npm run build:web && node scripts/server.mjs",
+    "check": "node --check app.js && node --check scripts/server.mjs && node --check functions/index.js && node --check functions/alert-conditions.js && npm run build:web"
   },
   "dependencies": {
     "@capacitor-community/speech-recognition": "^7.0.1",
+    "@capacitor-firebase/app-check": "^7.5.0",
+    "@capacitor-firebase/authentication": "^7.5.0",
     "@capacitor/android": "^7.4.3",
     "@capacitor/core": "^7.4.3",
     "@capacitor/geolocation": "^7.1.5",
     "@capacitor/local-notifications": "^7.0.3",
     "@capacitor/status-bar": "^7.0.3",
+    "firebase": "^11.2.0",
     "leaflet": "^1.9.4"
   },
   "devDependencies": {
-    "@capacitor/cli": "^7.4.3"
+    "@capacitor/cli": "^7.4.3",
+    "esbuild": "^0.28.2"
   }
 }
