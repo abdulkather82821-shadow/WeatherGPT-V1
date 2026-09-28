@@ -47,7 +47,7 @@ const aiCallableOptions = {
 
 exports.chatWithWeatherGPT = onCall({
   ...aiCallableOptions,
-  secrets: [geminiApiKey, openAiApiKey, anthropicApiKey]
+  secrets: [openAiApiKey]
 }, async (request) => {
   try {
     return await aiGateway.chat(request);

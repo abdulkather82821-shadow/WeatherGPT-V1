@@ -38,4 +38,6 @@ Provider keys are only read by Cloud Functions. Configure the following `aiGatew
 
 Add equivalent enabled model lists for `openai` and `anthropic` as needed. Each enabled model must specify current input/output USD per million token rates; those admin-supplied rates are used only for estimated cost metrics. `providerOrder` sets Auto/fallback priority. An explicitly selected provider is tried first, followed by other enabled providers. Unknown or disabled provider/model IDs are rejected.
 
+For an OpenAI-only deployment, add `OPENAI_API_KEY` to Secret Manager and bind that secret to `chatWithWeatherGPT` in `functions/index.js`. Configure `aiGatewayConfig/active` with `providerOrder: ["openai"]`, `providers.openai.enabled: true`, and at least one enabled model with its current price rates. Do not create placeholder secrets for providers you do not use. When adding another provider, create its secret and bind it to `chatWithWeatherGPT` before enabling it in the model catalog.
+
 Request counters and aggregate latency, token, success/failure, provider, and estimated-cost metrics are stored in the Admin-SDK-only `aiUsageDaily` and `aiUsageMonthly` collections. Message bodies and conversation history are never written to metrics.
