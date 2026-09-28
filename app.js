@@ -85,6 +85,12 @@ const state = {
   notificationsEnabled: readStorage("wg-notifications-enabled", false),
   voiceResponses: readStorage("wg-voice-responses", false),
   emailUser: null, emailPreferences: null, emailLocation: null, emailPreferenceRequestId: 0, emailLocationUpdatePending: false,
+  conversationId: readStorage("wg-conversation-id", ""), conversationMessages: readStorage("wg-conversation-messages", []),
+  conversations: [], aiProviders: [], selectedProvider: readStorage("wg-ai-provider", "auto"), selectedModel: readStorage("wg-ai-model", "auto"),
+  voiceName: readStorage("wg-voice-name", "auto"), voiceRate: readStorage("wg-voice-rate", 1),
+  voiceVolume: readStorage("wg-voice-volume", 1),
+  voiceQuestionPending: false,
+  locationAccuracy: null,
   fieldCrop: readStorage("wg-field-crop", "general"), fieldStage: readStorage("wg-field-stage", "land-preparation"),
   mode: "general", currentTab: "home", forecastDays: 7, map: null, mapMarker: null, radarLayer: null,
   mapWeatherMarkers: [], mapRequestId: 0, mapUpdateTimeout: null,
@@ -124,6 +130,12 @@ function setLanguage(language) {
     const value = t(element.dataset.i18n);
     if (value) element.textContent = value;
   });
+  $("email-register").addEventListener("click", registerEmailAccount);
+  $("email-sign-in").addEventListener("click", signInEmailAccount);
+  $("email-reset").addEventListener("click", resetEmailPassword);
+  $("email-verify-resend").addEventListener("click", resendEmailVerification);
+  $("email-verify-refresh").addEventListener("click", refreshEmailVerification);
+  $("account-delete").addEventListener("click", deleteCurrentAccount);
   document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
     element.placeholder = t(element.dataset.i18nPlaceholder);
   });
@@ -133,8 +145,10 @@ function setLanguage(language) {
   const profileLanguage = $("profile-language");
   if (profileLanguage) profileLanguage.value = state.language;
   storeValue("wg-language", state.language);
+  saveSignedInProfile();
   if (state.weather) renderWeather(state.weather);
   $("language-select").value = state.language;
+  refreshAvailableVoices();
 }
 
 function getCondition(code) {
@@ -387,6 +401,9 @@ function renderLocationResults(results) {
     button.append(name, detail);
     button.addEventListener("click", async () => {
       state.location = { name: result.name, country: result.country || result.admin1 || "", latitude: result.latitude, longitude: result.longitude, timezone: result.timezone || "auto" };
+      state.locationAccuracy = null;
+      setText("location-accuracy", "Selected forecast-grid location · street-level address lookup is unavailable");
+      saveSignedInProfile();
       $("location-dialog").close();
       try { await loadWeather(); } catch (error) { console.error("Unable to load the selected location:", error); }
     });
@@ -402,6 +419,9 @@ async function findLocation(query) {
   if (!result.results?.length) throw new Error(`I couldn't find "${query}". Try a nearby city or a different spelling.`);
   const found = result.results[0];
   state.location = { name: found.name, country: found.country || found.admin1 || "", latitude: found.latitude, longitude: found.longitude, timezone: found.timezone || "auto" };
+  state.locationAccuracy = null;
+  setText("location-accuracy", "Selected forecast-grid location · street-level address lookup is unavailable");
+  saveSignedInProfile();
   await loadWeather();
 }
 
@@ -426,6 +446,224 @@ function addMessage(text, role, isError = false) {
   if (role === "assistant" && state.voiceResponses) speakAnswer(text);
 }
 
+function createConversationId() {
+  return globalThis.crypto?.randomUUID?.() || `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function persistLocalConversation() {
+  const conversations = readStorage("wg-local-conversations", []);
+  const existing = conversations.filter((item) => item.id !== state.conversationId);
+  const firstQuestion = state.conversationMessages.find((message) => message.role === "user")?.content;
+  const conversation = {
+    id: state.conversationId,
+    title: String(firstQuestion || "New conversation").slice(0, 80),
+    location: { ...state.location },
+    updatedAt: Date.now(),
+    searchText: state.conversationMessages.map((message) => message.content).join(" ").slice(-2000),
+    messages: state.conversationMessages.slice(-100)
+  };
+  storeValue("wg-local-conversations", [conversation, ...existing].slice(0, 50));
+  state.conversations = [conversation, ...state.conversations.filter((item) => item.id !== conversation.id)];
+  renderConversationList();
+}
+
+async function persistConversationMessage(message) {
+  state.conversationMessages.push(message);
+  state.conversationMessages = state.conversationMessages.slice(-100);
+  storeValue("wg-conversation-messages", state.conversationMessages);
+  if (!state.conversationId) {
+    state.conversationId = createConversationId();
+    storeValue("wg-conversation-id", state.conversationId);
+  }
+  persistLocalConversation();
+  const firebase = window.WeatherGPTFirebase;
+  if (!firebase?.getSignedInUser()) return;
+  try {
+    const question = state.conversationMessages.find((item) => item.role === "user")?.content || "New conversation";
+    await firebase.saveConversation({
+      id: state.conversationId,
+      title: question.slice(0, 80),
+      location: state.location,
+      searchText: state.conversationMessages.map((item) => item.content).join(" ").slice(-2000)
+    });
+    await firebase.saveConversationMessage(state.conversationId, message);
+  } catch (error) {
+    console.error("Conversation cloud sync failed:", error);
+    showToast("This conversation is saved on this device, but cloud sync failed.");
+  }
+}
+
+function renderConversationList(search = $("chat-history-search").value.trim().toLocaleLowerCase()) {
+  const list = $("chat-history-list");
+  list.replaceChildren();
+  const localConversations = readStorage("wg-local-conversations", []);
+  const conversations = state.emailUser ? state.conversations : localConversations;
+  const filtered = conversations.filter((item) => !search || `${item.title} ${item.location?.name || ""} ${item.searchText || item.messages?.map((message) => message.content).join(" ") || ""}`.toLocaleLowerCase().includes(search));
+  if (!filtered.length) {
+    list.textContent = search ? "No matching saved conversations." : state.emailUser ? "No cloud conversations yet." : "Sign in to sync chats between devices. Guest chats remain on this device.";
+    return;
+  }
+  for (const conversation of filtered.slice(0, 20)) {
+    const row = document.createElement("div");
+    row.className = "chat-history-item";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "chat-history-open";
+    open.textContent = `${conversation.title || "Weather chat"} · ${conversation.location?.name || "Location"}`;
+    open.addEventListener("click", () => openConversation(conversation));
+    row.append(open);
+    if (state.emailUser) {
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.textContent = "Rename";
+      rename.addEventListener("click", () => renameConversation(conversation));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Delete";
+      remove.addEventListener("click", () => removeConversation(conversation.id));
+      row.append(rename, remove);
+    }
+    list.append(row);
+  }
+}
+
+async function openConversation(conversation) {
+  try {
+    const local = readStorage("wg-local-conversations", []).find((item) => item.id === conversation.id);
+    const messages = state.emailUser ? await window.WeatherGPTFirebase.loadConversationMessages(conversation.id) : local?.messages || [];
+    state.conversationId = conversation.id;
+    state.conversationMessages = messages.map(({ role, content, provider, model }) => ({ role, content, provider, model }));
+    storeValue("wg-conversation-id", state.conversationId);
+    storeValue("wg-conversation-messages", state.conversationMessages);
+    $("chat-messages").replaceChildren();
+    state.conversationMessages.forEach((message) => addMessage(message.content, message.role));
+    setActiveTab("gpt");
+  } catch (error) {
+    console.error("Unable to load saved conversation:", error);
+    showToast("Could not open that saved conversation.");
+  }
+}
+
+async function renameConversation(conversation) {
+  const title = window.prompt("Enter a new conversation title:", conversation.title || "");
+  if (!title?.trim()) return;
+  try {
+    await window.WeatherGPTFirebase.renameConversation(conversation.id, title);
+    await loadConversationList();
+  } catch (error) {
+    console.error("Unable to rename conversation:", error);
+    showToast("Could not rename this conversation.");
+  }
+}
+
+async function removeConversation(id) {
+  if (!window.confirm("Delete this conversation and its saved messages?")) return;
+  try {
+    await window.WeatherGPTFirebase.deleteConversation(id);
+    state.conversations = state.conversations.filter((item) => item.id !== id);
+    renderConversationList();
+  } catch (error) {
+    console.error("Unable to delete conversation:", error);
+    showToast("Could not delete this conversation.");
+  }
+}
+
+async function loadConversationList() {
+  if (!state.emailUser) {
+    renderConversationList();
+    return;
+  }
+  try {
+    state.conversations = await window.WeatherGPTFirebase.listConversations();
+    renderConversationList();
+  } catch (error) {
+    console.error("Unable to load saved conversations:", error);
+    $("chat-history-list").textContent = "Cloud chat history is temporarily unavailable.";
+  }
+}
+
+function setAssistantModels(providers) {
+  state.aiProviders = Array.isArray(providers) ? providers : [];
+  const providerSelect = $("ai-provider-select");
+  providerSelect.replaceChildren(new Option("Auto", "auto"));
+  for (const provider of state.aiProviders) providerSelect.add(new Option(provider.name || provider.id, provider.id));
+  if (![...providerSelect.options].some((option) => option.value === state.selectedProvider)) state.selectedProvider = "auto";
+  providerSelect.value = state.selectedProvider;
+  providerSelect.disabled = !state.emailUser || !state.aiProviders.length;
+  updateModelOptions();
+}
+
+function updateModelOptions() {
+  const providerSelect = $("ai-provider-select");
+  const modelSelect = $("ai-model-select");
+  const provider = state.aiProviders.find((item) => item.id === providerSelect.value);
+  const models = provider?.models || state.aiProviders.flatMap((item) => item.models || []);
+  modelSelect.replaceChildren(new Option("Automatic", "auto"));
+  for (const model of models) modelSelect.add(new Option(model.name || model.id, model.id));
+  if (![...modelSelect.options].some((option) => option.value === state.selectedModel)) state.selectedModel = "auto";
+  modelSelect.value = state.selectedModel;
+  modelSelect.disabled = !state.emailUser || models.length === 0;
+}
+
+async function loadAiModels() {
+  if (!state.emailUser || !window.WeatherGPTFirebase?.configured) {
+    $("ai-gateway-status").textContent = "Sign in after Firebase setup to load administrator-enabled AI models.";
+    setAssistantModels([]);
+    $("assistant-mode-label").textContent = "LOCAL GUIDANCE";
+    return;
+  }
+  try {
+    const result = await window.WeatherGPTFirebase.getAiModels();
+    setAssistantModels(result?.providers);
+    const available = state.aiProviders.length > 0;
+    $("ai-gateway-status").textContent = available
+      ? "Configured AI gateway · weather context is fetched securely for each answer."
+      : "No AI provider is enabled by the administrator; local guidance remains available.";
+    $("assistant-mode-label").textContent = available ? "AI GATEWAY" : "LOCAL GUIDANCE";
+  } catch (error) {
+    console.error("AI model list could not be loaded:", error);
+    $("ai-gateway-status").textContent = "AI provider settings are unavailable. Local forecast guidance remains available.";
+    setAssistantModels([]);
+    $("assistant-mode-label").textContent = "LOCAL GUIDANCE";
+  }
+}
+
+async function saveSignedInProfile() {
+  const firebase = window.WeatherGPTFirebase;
+  if (!state.emailUser?.emailVerified || state.loadingProfile || !firebase) return;
+  try {
+    await firebase.saveProfile({
+      displayName: $("account-name").value,
+      preferredLanguage: state.language,
+      temperatureUnit: state.units,
+      defaultLocation: state.location,
+      voiceResponses: state.voiceResponses
+    });
+  } catch (error) {
+    console.error("Unable to sync profile settings:", error);
+    setText("account-status", "Profile changes remain available on this device; cloud sync failed.");
+  }
+}
+
+function refreshAvailableVoices() {
+  if (!("speechSynthesis" in window)) return;
+  const select = $("voice-select");
+  const selected = state.voiceName;
+  const allVoices = window.speechSynthesis.getVoices();
+  const locale = (languageLocales[state.language] || "en-IN").split("-")[0].toLowerCase();
+  const voices = allVoices.filter((voice) => voice.lang.toLowerCase().startsWith(locale));
+  select.replaceChildren(new Option(voices.length ? "Device default" : "No voice for this language", "auto"));
+  for (const voice of voices) {
+    const label = `${voice.name} (${voice.lang})`;
+    select.add(new Option(label, voice.voiceURI));
+  }
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+  else {
+    select.value = "auto";
+    state.voiceName = "auto";
+  }
+}
+
 function speakAnswer(text) {
   if (!("speechSynthesis" in window)) {
     showToast("Text-to-speech is not available on this device.");
@@ -434,6 +672,10 @@ function speakAnswer(text) {
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = languageLocales[state.language] || "en-IN";
+  utterance.rate = Math.min(1.3, Math.max(0.7, Number(state.voiceRate) || 1));
+  utterance.volume = Math.min(1, Math.max(0, Number(state.voiceVolume) || 0));
+  const voices = window.speechSynthesis.getVoices();
+  if (state.voiceName !== "auto") utterance.voice = voices.find((voice) => voice.voiceURI === state.voiceName) || null;
   window.speechSynthesis.speak(utterance);
 }
 
@@ -965,6 +1207,9 @@ function renderSavedLocations() {
     select.textContent = "Open";
     select.addEventListener("click", async () => {
       state.location = { ...location };
+      state.locationAccuracy = null;
+      setText("location-accuracy", "Saved forecast-grid location · street-level address lookup is unavailable");
+      saveSignedInProfile();
       await loadWeather();
       setActiveTab("home");
     });
@@ -994,6 +1239,7 @@ function saveCurrentLocation() {
   state.savedLocations.push({ ...state.location });
   storeValue("wg-locations", state.savedLocations);
   renderSavedLocations();
+  saveSignedInProfile();
   showToast(`${state.location.name} saved to your locations.`);
 }
 
@@ -1004,18 +1250,21 @@ async function useCurrentLocation() {
   try {
     const native = window.Capacitor?.Plugins?.Geolocation;
     const position = native
-      ? await native.getCurrentPosition({ enableHighAccuracy: false, timeout: 15000, maximumAge: 300000 })
+      ? await native.getCurrentPosition({ enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 })
       : await new Promise((resolve, reject) => {
         if (!navigator.geolocation) { reject(new Error("Location is not available in this browser.")); return; }
-        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: false, timeout: 15000, maximumAge: 300000 });
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 });
       });
+    state.locationAccuracy = Number.isFinite(position.coords.accuracy) ? Math.round(position.coords.accuracy) : null;
     state.location = {
-      name: "Near me",
+      name: "Current GPS point",
       country: "Current GPS location",
       latitude: position.coords.latitude,
       longitude: position.coords.longitude,
       timezone: "auto"
     };
+    setText("location-accuracy", state.locationAccuracy ? `GPS accuracy: ±${state.locationAccuracy} m · forecast grid location` : "GPS point selected · accuracy unavailable");
+    saveSignedInProfile();
     await loadWeather();
     setActiveTab("home");
   } catch (error) {
@@ -1070,13 +1319,32 @@ function showEmailStatus(message, isError = false) {
 
 async function handleEmailAuthState(user) {
   const requestId = ++state.emailPreferenceRequestId;
+  const previousUid = state.emailUser?.uid;
+  if (user?.uid !== previousUid) {
+    state.conversationId = createConversationId();
+    state.conversationMessages = [];
+    storeValue("wg-conversation-id", state.conversationId);
+    storeValue("wg-conversation-messages", []);
+    $("chat-messages").replaceChildren();
+  }
   state.emailUser = user;
   const configured = window.WeatherGPTFirebase?.configured === true;
   $("google-sign-in").disabled = !configured || Boolean(user);
   $("google-sign-in").hidden = Boolean(user);
   $("google-sign-out").hidden = !user;
-  $("email-alert-controls").hidden = !user;
   $("email-account-address").textContent = user?.email || "";
+  $("email-register").disabled = !configured || Boolean(user);
+  $("email-sign-in").disabled = !configured || Boolean(user);
+  $("email-reset").disabled = !configured;
+  $("account-delete").hidden = !user;
+  $("email-verify-resend").hidden = !user || user.emailVerified;
+  $("email-verify-refresh").hidden = !user || user.emailVerified;
+  $("email-alert-controls").hidden = !user?.emailVerified || !user.providerData.some((provider) => provider.providerId === "google.com");
+  $("account-name").value = user?.displayName || "";
+  $("account-email").value = user?.email || "";
+  $("account-heading").textContent = user ? user.emailVerified ? `Signed in as ${user.displayName || user.email}` : "Verify your email to enable cloud sync" : "Sign in or continue as guest";
+  setText("account-status", !configured ? "Firebase account services are not configured yet." : user ? user.emailVerified ? "Your account is verified. Profile and chat sync are available." : "Check your inbox for a verification link. Cloud sync and AI access require verification." : "Continue as a guest or sign in to sync profile and conversations.");
+  $("email-alert-controls").hidden = !user?.emailVerified || !user.providerData.some((provider) => provider.providerId === "google.com");
   if (!user) {
     state.emailPreferences = null;
     state.emailLocation = null;
@@ -1084,37 +1352,174 @@ async function handleEmailAuthState(user) {
     $("email-alert-consent").checked = false;
     setText("email-account-status", configured ? "Not signed in. Google sign-in is required to enable email alerts." : "Firebase project setup required before Google sign-in can be used.");
     showEmailStatus(configured ? "Email alerts are off until you sign in and opt in." : "Email notifications are not configured yet.");
+    state.conversations = [];
+    await loadConversationList();
+    await loadAiModels();
     return;
   }
   if (!user.emailVerified) {
     state.emailPreferences = null;
-    setText("email-account-status", "This Google account does not have a verified email address.");
-    $("email-alert-controls").hidden = true;
+    setText("email-account-status", "Verify your email before enabling email alerts.");
+    state.conversations = [];
+    await loadConversationList();
+    await loadAiModels();
     return;
   }
-  setText("email-account-status", "Google account connected · verified email");
+  setText("email-account-status", user.providerData.some((provider) => provider.providerId === "google.com")
+    ? "Google account connected · verified email"
+    : "Verified account connected. Google sign-in is required for forecast email alerts.");
   setText("email-alert-location", `${state.location.name} · ${state.location.latitude.toFixed(3)}, ${state.location.longitude.toFixed(3)}`);
   try {
-    const preferences = await window.WeatherGPTFirebase.loadEmailPreferences();
-    if (requestId !== state.emailPreferenceRequestId || state.emailUser?.uid !== user.uid) return;
-    state.emailPreferences = preferences;
-    Object.entries(emailPreferenceIds).forEach(([category, id]) => {
-      $(id).checked = preferences?.categories?.[category] === true;
-    });
-    $("email-alert-consent").checked = preferences?.enabled === true;
-    if (preferences?.enabled) {
-      const previous = preferences.location;
-      state.emailLocation = previous ? { latitude: previous.latitude, longitude: previous.longitude } : null;
-      showEmailStatus("Email alerts are enabled for this verified account. Forecast guidance is not an official warning.");
-    } else {
-      state.emailLocation = null;
-      showEmailStatus("Choose alert types, tick the consent box, then save to enable emails.");
+    if (user.providerData.some((provider) => provider.providerId === "google.com")) {
+      const preferences = await window.WeatherGPTFirebase.loadEmailPreferences();
+      if (requestId !== state.emailPreferenceRequestId || state.emailUser?.uid !== user.uid) return;
+      state.emailPreferences = preferences;
+      Object.entries(emailPreferenceIds).forEach(([category, id]) => {
+        $(id).checked = preferences?.categories?.[category] === true;
+      });
+      $("email-alert-consent").checked = preferences?.enabled === true;
+      if (preferences?.enabled) {
+        const previous = preferences.location;
+        state.emailLocation = previous ? { latitude: previous.latitude, longitude: previous.longitude } : null;
+        showEmailStatus("Email alerts are enabled for this verified account. Forecast guidance is not an official warning.");
+      } else {
+        state.emailLocation = null;
+        showEmailStatus("Choose alert types, tick the consent box, then save to enable emails.");
+      }
+      updateEmailLocationIfSubscribed();
     }
-    updateEmailLocationIfSubscribed();
+    const profile = await window.WeatherGPTFirebase.loadProfile();
+    if (requestId !== state.emailPreferenceRequestId || state.emailUser?.uid !== user.uid) return;
+    if (profile) {
+      $("account-name").value = profile.displayName || user.displayName || "";
+      state.loadingProfile = true;
+      if (profile.preferredLanguage && translations[profile.preferredLanguage]) setLanguage(profile.preferredLanguage);
+      if (profile.temperatureUnit === "fahrenheit" || profile.temperatureUnit === "celsius") setTemperatureUnit(profile.temperatureUnit);
+      if (profile.defaultLocation && Number.isFinite(profile.defaultLocation.latitude) && Number.isFinite(profile.defaultLocation.longitude)) {
+        state.location = {
+          ...state.location,
+          ...profile.defaultLocation,
+          country: state.location.country
+        };
+        storeValue("wg-current-location", state.location);
+      }
+      state.voiceResponses = profile.voiceResponses === true;
+      $("voice-responses").checked = state.voiceResponses;
+      state.loadingProfile = false;
+      await loadWeather();
+    }
+    await Promise.all([loadConversationList(), loadAiModels()]);
   } catch (error) {
     if (requestId !== state.emailPreferenceRequestId) return;
     console.error("Unable to load Firebase email preferences:", error);
     showEmailStatus(error instanceof Error ? `Could not load email settings: ${error.message}` : "Could not load email settings.", true);
+  }
+}
+
+function authErrorMessage(error) {
+  const messages = {
+    "auth/email-already-in-use": "An account already uses this email. Try signing in or resetting its password.",
+    "auth/invalid-credential": "The email or password is incorrect.",
+    "auth/invalid-email": "Enter a valid email address.",
+    "auth/weak-password": "Choose a password with at least 8 characters.",
+    "auth/too-many-requests": "Too many attempts. Wait a while and try again.",
+    "auth/network-request-failed": "The account service could not connect. Check your network.",
+    "auth/requires-recent-login": "For security, sign in again before deleting your account.",
+    "auth/user-not-found": "No account could be signed in with those credentials.",
+    "auth/wrong-password": "The email or password is incorrect."
+  };
+  return messages[error?.code] || "The account request could not be completed. Check your details and try again.";
+}
+
+async function registerEmailAccount() {
+  const firebase = window.WeatherGPTFirebase;
+  const email = $("account-email").value.trim();
+  const password = $("account-password").value;
+  if (!email || password.length < 8) {
+    setText("account-status", "Enter a valid email and a password with at least 8 characters.");
+    return;
+  }
+  $("email-register").disabled = true;
+  try {
+    await firebase.registerWithEmail(email, password, $("account-name").value);
+    setText("account-status", "Account created. Check your inbox for the verification link before using cloud sync.");
+  } catch (error) {
+    console.error("Email account registration failed:", error);
+    setText("account-status", authErrorMessage(error));
+  } finally {
+    $("email-register").disabled = Boolean(state.emailUser);
+  }
+}
+
+async function signInEmailAccount() {
+  const firebase = window.WeatherGPTFirebase;
+  $("email-sign-in").disabled = true;
+  try {
+    await firebase.signInWithEmail($("account-email").value.trim(), $("account-password").value);
+    setText("account-status", "Signed in. Verify your email to enable cloud sync and the AI gateway.");
+  } catch (error) {
+    console.error("Email sign-in failed:", error);
+    setText("account-status", authErrorMessage(error));
+  } finally {
+    $("email-sign-in").disabled = Boolean(state.emailUser);
+  }
+}
+
+async function resetEmailPassword() {
+  const email = $("account-email").value.trim();
+  if (!email) {
+    setText("account-status", "Enter the email address for the password-reset request.");
+    return;
+  }
+  $("email-reset").disabled = true;
+  try {
+    await window.WeatherGPTFirebase.sendPasswordReset(email);
+    setText("account-status", "If an account can receive password-reset email, instructions will arrive shortly.");
+  } catch (error) {
+    console.error("Password reset request failed:", error);
+    setText("account-status", "The reset request could not be completed. Check the email and try again later.");
+  } finally {
+    $("email-reset").disabled = false;
+  }
+}
+
+async function deleteCurrentAccount() {
+  if (!state.emailUser || !window.confirm("Permanently delete your Firebase account, profile and saved conversations? This cannot be undone.")) return;
+  try {
+    await window.WeatherGPTFirebase.deleteAccount($("account-password").value);
+    setText("account-status", "Your account and cloud data were deleted.");
+    $("account-password").value = "";
+    for (const key of ["wg-local-conversations", "wg-conversation-messages", "wg-conversation-id", "wg-locations"]) {
+      localStorage.removeItem(key);
+    }
+    state.savedLocations = [];
+    state.conversations = [];
+    state.conversationMessages = [];
+    $("chat-messages").replaceChildren();
+    renderSavedLocations();
+  } catch (error) {
+    console.error("Account deletion failed:", error);
+    setText("account-status", authErrorMessage(error));
+  }
+}
+
+async function refreshEmailVerification() {
+  try {
+    await window.WeatherGPTFirebase.refreshAuthUser();
+    await handleEmailAuthState(window.WeatherGPTFirebase.getSignedInUser());
+  } catch (error) {
+    console.error("Email verification refresh failed:", error);
+    setText("account-status", "Could not refresh account status. Check your connection and try again.");
+  }
+}
+
+async function resendEmailVerification() {
+  try {
+    await window.WeatherGPTFirebase.resendVerificationEmail();
+    setText("account-status", "A verification link has been sent. Check your inbox and spam folder.");
+  } catch (error) {
+    console.error("Verification email could not be resent:", error);
+    setText("account-status", authErrorMessage(error));
   }
 }
 
@@ -1127,11 +1532,19 @@ async function initializeFirebaseEmail() {
   }
   if (!firebase.configured) {
     $("google-sign-in").disabled = true;
+    $("email-register").disabled = true;
+    $("email-sign-in").disabled = true;
+    $("email-reset").disabled = true;
     setText("email-account-status", "Firebase project setup required before Google sign-in can be used.");
     showEmailStatus("Add your Firebase web app configuration, enable Google Authentication, and add Android SHA-1 fingerprints.");
+    await loadConversationList();
+    await loadAiModels();
     return;
   }
   $("google-sign-in").disabled = true;
+  $("email-register").disabled = true;
+  $("email-sign-in").disabled = true;
+  $("email-reset").disabled = false;
   setText("email-account-status", "Connecting to Firebase Authentication…");
   try {
     await firebase.initialize(handleEmailAuthState);
@@ -1139,6 +1552,9 @@ async function initializeFirebaseEmail() {
   } catch (error) {
     console.error("Firebase Authentication initialization failed:", error);
     $("google-sign-in").disabled = true;
+    $("email-register").disabled = true;
+    $("email-sign-in").disabled = true;
+    $("email-reset").disabled = true;
     setText("email-account-status", error instanceof Error ? `Firebase setup error: ${error.message}` : "Firebase setup failed.");
     showEmailStatus("Google sign-in could not be initialized. Check the Firebase project configuration and Android setup.", true);
   }
@@ -1228,6 +1644,7 @@ function setTemperatureUnit(unit) {
   state.units = unit === "fahrenheit" ? "fahrenheit" : "celsius";
   storeValue("wg-units", state.units);
   if (state.weather) renderWeather(state.weather);
+  saveSignedInProfile();
 }
 
 function setWeatherRole(role) {
@@ -1312,6 +1729,9 @@ async function sendQuestion(question) {
   const cleanQuestion = question.trim();
   if (!cleanQuestion) return;
   addMessage(cleanQuestion, "user");
+  const priorMessages = state.conversationMessages.slice(-10).map(({ role, content }) => ({ role, content }));
+  await persistConversationMessage({ role: "user", content: cleanQuestion, inputType: state.voiceQuestionPending ? "voice" : "text" });
+  state.voiceQuestionPending = false;
   $("chat-input").value = "";
   $("chat-input").disabled = true;
   try {
@@ -1319,19 +1739,50 @@ async function sendQuestion(question) {
     const locationMatch = cleanQuestion.match(/\b(?:in|for|at|near)\s+([a-zA-Z][a-zA-Z .'-]{1,45}?)(?:\s+(?:today|tomorrow|this week|next week|this weekend|on the weekend))?[?.!,;:]*$/i);
     if (alias) await findLocation(alias.search);
     else if (locationMatch && !/^(?:today|tomorrow|week|forecast|rain|weather|climate)\b/i.test(locationMatch[1].trim())) await findLocation(locationMatch[1].trim());
-    const reply = answerQuestion(cleanQuestion);
+    let reply;
+    let replyMetadata = {};
+    if (state.emailUser && state.aiProviders.length && state.weather) {
+      try {
+        const result = await window.WeatherGPTFirebase.chatWithWeatherGPT({
+          question: cleanQuestion,
+          location: state.location,
+          language: state.language,
+          history: priorMessages,
+          provider: state.selectedProvider,
+          model: state.selectedModel
+        });
+        reply = result.answer;
+        replyMetadata = { provider: result.provider, model: result.model };
+        $("ai-gateway-status").textContent = `Answered by ${result.provider} · ${result.model}; live weather ${result.weather?.updatedAt || "retrieved by gateway"}.`;
+      } catch (error) {
+        console.error("AI gateway request failed:", error);
+        const localReply = answerQuestion(cleanQuestion);
+        reply = localReply === null ? "I could not reach the configured AI provider, and this question needs historical climate data. Please use the climate charts when available." : `The AI service is temporarily unavailable. Local Open-Meteo forecast guidance (not an AI response): ${localReply}`;
+        replyMetadata = { provider: "local", model: "forecast-rules" };
+        $("ai-gateway-status").textContent = "AI unavailable; this answer uses local forecast guidance.";
+      }
+    } else {
+      reply = answerQuestion(cleanQuestion);
+      replyMetadata = { provider: "local", model: "forecast-rules" };
+    }
     if (reply === null) {
       if (/last year|previous year|last month|\b(?:19|20)\d{2}\b/.test(cleanQuestion.toLowerCase())) {
-        addMessage(await answerClimateQuestion(cleanQuestion), "assistant");
+        reply = await answerClimateQuestion(cleanQuestion);
       } else {
         setActiveTab("climate");
         await loadClimateHistory();
-        addMessage(`I opened the historical climate charts for ${state.location.name}. They use Open-Meteo's historical archive; observations are not forecasts or an official climatological record.`, "assistant");
+        reply = `I opened the historical climate charts for ${state.location.name}. They use Open-Meteo's historical archive; observations are not forecasts or an official climatological record.`;
       }
-    } else addMessage(reply, "assistant");
+    }
+    addMessage(reply, "assistant");
+    await persistConversationMessage({ role: "assistant", content: reply, ...replyMetadata });
   } catch (error) {
     console.error("Unable to answer weather question:", error);
-    addMessage(error instanceof Error ? error.message : "I couldn't retrieve that information. Please try again.", "assistant", true);
+    const fallback = state.weather
+      ? "I couldn't complete that answer. Your live forecast remains available on the Home screen; please try again."
+      : "Live weather data is temporarily unavailable. Please try again when a current forecast is available.";
+    addMessage(fallback, "assistant", true);
+    await persistConversationMessage({ role: "assistant", content: fallback, provider: "system", model: "error" });
   } finally {
     $("chat-input").disabled = false;
     $("chat-input").focus();
@@ -1472,6 +1923,8 @@ function initialize() {
     $(`${category}-notifications`).checked = Boolean(state.notifications[category]);
   }
   $("voice-responses").checked = Boolean(state.voiceResponses);
+  $("voice-rate").value = String(Math.min(1.3, Math.max(0.7, Number(state.voiceRate) || 1)));
+  $("voice-volume").value = String(Math.min(1, Math.max(0, Number(state.voiceVolume) || 0)));
   setLanguage(state.language);
   $("today-date").textContent = new Intl.DateTimeFormat(languageLocales[state.language] || "en-IN", { weekday: "long", month: "short", day: "numeric" }).format(new Date());
   $("chat-form").addEventListener("submit", (event) => { event.preventDefault(); sendQuestion($("chat-input").value); });
@@ -1483,6 +1936,31 @@ function initialize() {
   $("profile-language").addEventListener("change", (event) => setLanguage(event.target.value));
   $("profile-role").addEventListener("change", (event) => setWeatherRole(event.target.value));
   $("unit-select").addEventListener("change", (event) => setTemperatureUnit(event.target.value));
+  $("account-name").addEventListener("change", saveSignedInProfile);
+  $("ai-provider-select").addEventListener("change", (event) => {
+    state.selectedProvider = event.target.value;
+    state.selectedModel = "auto";
+    storeValue("wg-ai-provider", state.selectedProvider);
+    storeValue("wg-ai-model", state.selectedModel);
+    updateModelOptions();
+  });
+  $("ai-model-select").addEventListener("change", (event) => {
+    state.selectedModel = event.target.value;
+    storeValue("wg-ai-model", state.selectedModel);
+  });
+  $("chat-history-search").addEventListener("input", () => renderConversationList());
+  $("voice-select").addEventListener("change", (event) => {
+    state.voiceName = event.target.value;
+    storeValue("wg-voice-name", state.voiceName);
+  });
+  $("voice-rate").addEventListener("input", (event) => {
+    state.voiceRate = Number(event.target.value);
+    storeValue("wg-voice-rate", state.voiceRate);
+  });
+  $("voice-volume").addEventListener("input", (event) => {
+    state.voiceVolume = Number(event.target.value);
+    storeValue("wg-voice-volume", state.voiceVolume);
+  });
   $("field-crop").addEventListener("change", (event) => {
     state.fieldCrop = event.target.value;
     storeValue("wg-field-crop", state.fieldCrop);
@@ -1508,6 +1986,10 @@ function initialize() {
   $("voice-responses").addEventListener("change", (event) => {
     state.voiceResponses = event.target.checked;
     storeValue("wg-voice-responses", state.voiceResponses);
+    saveSignedInProfile();
+  });
+  $("speech-stop").addEventListener("click", () => {
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
   });
   for (const category of ["rain", "storm", "wind", "heat", "cold"]) {
     $(`${category}-notifications`).addEventListener("change", (event) => {
@@ -1563,9 +2045,25 @@ function initialize() {
     if (state.weather) renderForecast(state.weather.daily);
   });
   $("new-chat").addEventListener("click", () => {
+    state.conversationId = createConversationId();
+    state.conversationMessages = [];
+    storeValue("wg-conversation-id", state.conversationId);
+    storeValue("wg-conversation-messages", []);
     $("chat-messages").replaceChildren();
     $("chat-input").focus();
   });
+  if (Array.isArray(state.conversationMessages)) {
+    state.conversationMessages.forEach((message) => {
+      if (["user", "assistant"].includes(message.role) && typeof message.content === "string") addMessage(message.content, message.role);
+    });
+  } else {
+    state.conversationMessages = [];
+  }
+  if (!state.conversationId) {
+    state.conversationId = createConversationId();
+    storeValue("wg-conversation-id", state.conversationId);
+  }
+  persistLocalConversation();
   $("forecast-detail")?.addEventListener("click", () => $("forecast").scrollIntoView({ behavior: "smooth", block: "start" }));
   $("load-climate").addEventListener("click", loadClimateHistory);
   $("notification-button").addEventListener("click", () => setActiveTab("alerts"));
@@ -1573,6 +2071,8 @@ function initialize() {
   renderSavedLocations();
   setWeatherRole(state.role);
   setupVoice();
+  refreshAvailableVoices();
+  window.speechSynthesis?.addEventListener?.("voiceschanged", refreshAvailableVoices);
   initializeFirebaseEmail();
   loadWeather();
   window.setInterval(loadWeather, 15 * 60 * 1000);

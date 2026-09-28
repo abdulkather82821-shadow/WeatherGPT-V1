@@ -38,6 +38,122 @@ service cloud.firestore {
         && request.auth.uid == uid
         && request.auth.token.email_verified == true
         && request.auth.token.firebase.sign_in_provider == 'google.com';
+
+      match /private/{documentId} {
+        allow read: if request.auth != null
+          && request.auth.uid == uid
+          && request.auth.token.email_verified == true;
+        allow create, update: if request.auth != null
+          && request.auth.uid == uid
+          && request.auth.token.email_verified == true
+          && documentId == 'profile'
+          && request.resource.data.keys().hasOnly([
+            'displayName', 'preferredLanguage', 'temperatureUnit',
+            'defaultLocation', 'voiceResponses', 'updatedAt'
+          ])
+          && request.resource.data.displayName is string
+          && request.resource.data.displayName.size() <= 80
+          && request.resource.data.preferredLanguage in [
+            'en', 'hi', 'ta', 'te', 'kn', 'ml', 'bn', 'mr', 'gu', 'pa', 'ur'
+          ]
+          && request.resource.data.temperatureUnit in ['celsius', 'fahrenheit']
+          && request.resource.data.voiceResponses is bool
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.defaultLocation is map
+          && request.resource.data.defaultLocation.keys().hasOnly([
+            'name', 'latitude', 'longitude', 'timezone'
+          ])
+          && request.resource.data.defaultLocation.name is string
+          && request.resource.data.defaultLocation.name.size() <= 100
+          && request.resource.data.defaultLocation.latitude is number
+          && request.resource.data.defaultLocation.latitude >= -90
+          && request.resource.data.defaultLocation.latitude <= 90
+          && request.resource.data.defaultLocation.longitude is number
+          && request.resource.data.defaultLocation.longitude >= -180
+          && request.resource.data.defaultLocation.longitude <= 180
+          && request.resource.data.defaultLocation.timezone is string
+          && request.resource.data.defaultLocation.timezone.size() <= 80;
+        allow delete: if request.auth != null
+          && request.auth.uid == uid
+          && request.auth.token.email_verified == true;
+      }
+
+      match /conversations/{conversationId} {
+        allow read, delete: if request.auth != null
+          && request.auth.uid == uid
+          && request.auth.token.email_verified == true;
+        allow create: if request.auth != null
+          && request.auth.uid == uid
+          && request.auth.token.email_verified == true
+          && request.resource.data.keys().hasOnly([
+            'title', 'location', 'searchText', 'createdAt', 'updatedAt', 'pinned', 'archived'
+          ])
+          && request.resource.data.title is string
+          && request.resource.data.title.size() <= 120
+          && request.resource.data.searchText is string
+          && request.resource.data.searchText.size() <= 2000
+          && request.resource.data.location is map
+          && request.resource.data.location.keys().hasOnly(['name', 'latitude', 'longitude'])
+          && request.resource.data.location.name is string
+          && request.resource.data.location.name.size() <= 100
+          && request.resource.data.location.latitude is number
+          && request.resource.data.location.latitude >= -90
+          && request.resource.data.location.latitude <= 90
+          && request.resource.data.location.longitude is number
+          && request.resource.data.location.longitude >= -180
+          && request.resource.data.location.longitude <= 180
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.pinned is bool
+          && request.resource.data.archived is bool;
+        allow update: if request.auth != null
+          && request.auth.uid == uid
+          && request.auth.token.email_verified == true
+          && request.resource.data.keys().hasOnly([
+            'title', 'location', 'searchText', 'createdAt', 'updatedAt', 'pinned', 'archived'
+          ])
+          && request.resource.data.title is string
+          && request.resource.data.title.size() <= 120
+          && request.resource.data.searchText is string
+          && request.resource.data.searchText.size() <= 2000
+          && request.resource.data.location is map
+          && request.resource.data.location.keys().hasOnly(['name', 'latitude', 'longitude'])
+          && request.resource.data.location.name is string
+          && request.resource.data.location.name.size() <= 100
+          && request.resource.data.location.latitude is number
+          && request.resource.data.location.latitude >= -90
+          && request.resource.data.location.latitude <= 90
+          && request.resource.data.location.longitude is number
+          && request.resource.data.location.longitude >= -180
+          && request.resource.data.location.longitude <= 180
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.pinned is bool
+          && request.resource.data.archived is bool;
+
+        match /messages/{messageId} {
+          allow read, delete: if request.auth != null
+            && request.auth.uid == uid
+            && request.auth.token.email_verified == true;
+          allow create: if request.auth != null
+            && request.auth.uid == uid
+            && request.auth.token.email_verified == true
+            && request.resource.data.keys().hasOnly([
+              'role', 'content', 'createdAt', 'provider', 'model', 'inputType'
+            ])
+            && request.resource.data.role in ['user', 'assistant']
+            && request.resource.data.content is string
+            && request.resource.data.content.size() > 0
+            && request.resource.data.content.size() <= 4000
+            && request.resource.data.createdAt == request.time
+            && request.resource.data.provider is string
+            && request.resource.data.provider.size() <= 40
+            && request.resource.data.model is string
+            && request.resource.data.model.size() <= 80
+            && request.resource.data.inputType in ['text', 'voice'];
+          allow update: if false;
+        }
+      }
     }
 
     match /emailAlertState/{stateId} {
@@ -49,6 +165,26 @@ service cloud.firestore {
     }
 
     match /emailDeliveryLimits/{limitId} {
+      allow read, write: if false;
+    }
+
+    match /aiGateway/{documentId} {
+      allow read, write: if false;
+    }
+
+    match /aiGatewayConfig/{documentId} {
+      allow read, write: if false;
+    }
+
+    match /aiUsage/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /aiUsageDaily/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /aiUsageMonthly/{document=**} {
       allow read, write: if false;
     }
   }
