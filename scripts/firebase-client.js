@@ -1,23 +1,28 @@
 import { Capacitor } from "@capacitor/core";
+import { TextToSpeech } from "@capacitor-community/text-to-speech";
 import { FirebaseAppCheck } from "@capacitor-firebase/app-check";
 import { FirebaseAuthentication } from "@capacitor-firebase/authentication";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { CustomProvider, ReCaptchaV3Provider, initializeAppCheck } from "firebase/app-check";
+import { CustomProvider, ReCaptchaV3Provider, getToken as getAppCheckToken, initializeAppCheck } from "firebase/app-check";
 import {
+  EmailAuthProvider,
   GoogleAuthProvider,
   createUserWithEmailAndPassword,
   deleteUser,
   getAuth,
   indexedDBLocalPersistence,
   initializeAuth,
+  linkWithCredential,
   onAuthStateChanged,
   sendEmailVerification,
   sendPasswordResetEmail,
+  signInAnonymously,
   signInWithEmailAndPassword,
   signInWithCredential,
   signInWithPopup,
   signOut,
-  reload
+  reload,
+  updateProfile
 } from "firebase/auth";
 import {
   addDoc,
@@ -34,8 +39,6 @@ import {
   setDoc,
   updateDoc
 } from "firebase/firestore";
-import { getFunctions, httpsCallable } from "firebase/functions";
-
 const requiredKeys = ["apiKey", "authDomain", "projectId", "appId"];
 const firebaseConfig = window.WEATHERGPT_FIREBASE_CONFIG;
 const isConfigured = requiredKeys.every((key) => {
@@ -44,7 +47,7 @@ const isConfigured = requiredKeys.every((key) => {
 });
 let auth;
 let database;
-let functions;
+let appCheck;
 let unsubscribeAuth;
 let userCallback;
 
@@ -77,7 +80,7 @@ async function initialize(onUser) {
   const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
   if (Capacitor.isNativePlatform()) {
     await FirebaseAppCheck.initialize({ isTokenAutoRefreshEnabled: true });
-    initializeAppCheck(app, {
+    appCheck = initializeAppCheck(app, {
       provider: new CustomProvider({ getToken: () => FirebaseAppCheck.getToken() }),
       isTokenAutoRefreshEnabled: true
     });
@@ -88,17 +91,16 @@ async function initialize(onUser) {
       auth = getAuth(app);
     }
   } else {
-    if (!firebaseConfig.recaptchaV3SiteKey || firebaseConfig.recaptchaV3SiteKey.startsWith("REPLACE_")) {
-      throw new Error("A reCAPTCHA v3 site key is required to use protected Firebase email settings on the web.");
+    const siteKey = firebaseConfig.recaptchaV3SiteKey;
+    if (siteKey && !siteKey.startsWith("REPLACE_")) {
+      appCheck = initializeAppCheck(app, {
+        provider: new ReCaptchaV3Provider(siteKey),
+        isTokenAutoRefreshEnabled: true
+      });
     }
-    initializeAppCheck(app, {
-      provider: new ReCaptchaV3Provider(firebaseConfig.recaptchaV3SiteKey),
-      isTokenAutoRefreshEnabled: true
-    });
     auth = getAuth(app);
   }
   database = getFirestore(app);
-  functions = getFunctions(app, firebaseConfig.functionsRegion || "asia-south1");
   unsubscribeAuth?.();
   unsubscribeAuth = onAuthStateChanged(auth, updateAuthUser);
   if (Capacitor.isNativePlatform()) await synchronizeNativeUser();
@@ -117,6 +119,12 @@ async function signInWithGoogle() {
   await signInWithPopup(auth, new GoogleAuthProvider());
 }
 
+async function continueAsGuest() {
+  if (!auth) throw new Error("Firebase Authentication is not configured.");
+  if (auth.currentUser) return auth.currentUser;
+  return (await signInAnonymously(auth)).user;
+}
+
 async function signOutUser() {
   if (!auth) return;
   if (Capacitor.isNativePlatform()) await FirebaseAuthentication.signOut();
@@ -125,10 +133,13 @@ async function signOutUser() {
 
 async function registerWithEmail(email, password, displayName) {
   if (!auth) throw new Error("Firebase Authentication is not configured.");
-  const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
-  if (displayName.trim()) {
-    const { updateProfile } = await import("firebase/auth");
-    await updateProfile(credential.user, { displayName: displayName.trim().slice(0, 80) });
+  const currentUser = auth.currentUser;
+  const credential = currentUser?.isAnonymous
+    ? await linkWithCredential(currentUser, EmailAuthProvider.credential(email.trim(), password))
+    : await createUserWithEmailAndPassword(auth, email.trim(), password);
+  const name = displayName.trim().slice(0, 80);
+  if (name) {
+    await updateProfile(credential.user, { displayName: name });
   }
   await sendEmailVerification(credential.user);
   return credential.user;
@@ -161,7 +172,6 @@ async function deleteAccount(password) {
   const user = auth?.currentUser;
   if (!user) throw new Error("Sign in before deleting your account.");
   const accountUid = user.uid;
-  if (!functions) throw new Error("Secure account-data deletion is not configured yet.");
   if (user.providerData.some((provider) => provider.providerId === "password")) {
     const email = user.email;
     if (!email || !password) throw new Error("Enter your password to confirm account deletion.");
@@ -290,10 +300,45 @@ async function deleteConversation(conversationId) {
 }
 
 async function callAI(name, payload) {
-  if (!functions) throw new Error("Sign in to use the configured WeatherGPT AI gateway.");
-  const invoke = httpsCallable(functions, name, { timeout: 60_000 });
-  const result = await invoke(payload);
-  return result.data;
+  const user = auth?.currentUser;
+  if (!user?.emailVerified) throw new Error("Sign in with a verified email account to use the WeatherGPT AI gateway.");
+  const gatewayUrl = firebaseConfig.aiGatewayUrl || "https://weather-gpt-v1.vercel.app/api/ai";
+  const idToken = await user.getIdToken();
+  let appCheckToken;
+  if (Capacitor.isNativePlatform()) {
+    appCheckToken = (await FirebaseAppCheck.getToken()).token;
+  } else if (appCheck) {
+    appCheckToken = (await getAppCheckToken(appCheck)).token;
+  }
+  if (!appCheckToken) throw new Error("WeatherGPT AI access requires a valid Firebase App Check token.");
+  const operation = {
+    getAiModels: "models",
+    chatWithWeatherGPT: "chat",
+    deleteOwnAccountData: "delete-account"
+  }[name];
+  if (!operation) throw new Error("This WeatherGPT gateway operation is not available.");
+  const response = await fetch(`${gatewayUrl.replace(/\/+$/, "")}/${operation}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+      "X-Firebase-AppCheck": appCheckToken
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(60_000)
+  });
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error("The WeatherGPT AI gateway returned an invalid response.");
+  }
+  if (!response.ok) {
+    const error = new Error(result?.error?.message || "WeatherGPT could not complete this request.");
+    error.code = `functions/${result?.error?.code || "internal"}`;
+    throw error;
+  }
+  return result;
 }
 
 async function loadEmailPreferences() {
@@ -337,6 +382,7 @@ window.WeatherGPTFirebase = {
   configured: isConfigured,
   initialize,
   signInWithGoogle,
+  continueAsGuest,
   registerWithEmail,
   signInWithEmail,
   sendPasswordReset,
@@ -357,4 +403,9 @@ window.WeatherGPTFirebase = {
   chatWithWeatherGPT: (payload) => callAI("chatWithWeatherGPT", payload),
   loadEmailPreferences,
   saveEmailPreferences
+};
+
+window.WeatherGPTSpeech = {
+  isNative: Capacitor.isNativePlatform(),
+  textToSpeech: TextToSpeech
 };
