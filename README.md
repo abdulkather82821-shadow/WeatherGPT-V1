@@ -21,7 +21,11 @@ $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
 npm.cmd run android:run
 ```
 
-Build a debug APK from the Android directory:
+### Build the APK on GitHub (no local Android setup)
+
+`.github/workflows/android-apk.yml` builds a debug APK on every pull request, push to `main`, tag `v*` and manual run (**Actions → Build Android APK → Run workflow**). It runs the tests, builds the web assets, uses the existing `capacitor.config.json` to create and sync the Android project (`scripts/android-prepare.mjs` also declares the location, microphone, notification and network permissions), and runs `gradlew assembleDebug`. Download `WeatherGPT-debug-apk` from the run's **Artifacts**; pushing a `v*` tag also attaches `WeatherGPT-debug.apk` to a GitHub Release. Optional repository secrets: `FIREBASE_CONFIG_JS` (contents of your `firebase-config.js`) and `GOOGLE_SERVICES_JSON_BASE64` (base64 of `google-services.json`, needed for native Google sign-in). Without them the APK still builds and the local agent works. The `app-debug.apk` checked into the repo is an older build; use the workflow artifact for the version with the agent.
+
+Build a debug APK locally from the Android directory:
 
 ```powershell
 $env:JAVA_HOME = 'C:\Path\To\JDK-21'
