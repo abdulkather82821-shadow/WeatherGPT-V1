@@ -1,0 +1,69 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # The ubuntu-latest runner image already ships the Android SDK (ANDROID_HOME) with accepted licenses.
+
+      - run: npm ci
+
+      - name: Test
+        run: npm test
+
+      # Optional: keep the real Firebase web config in a repository secret (never commit it).
+      - name: Write firebase-config.js from secret
+        run: |
+          if [ -n "$FIREBASE_CONFIG_JS" ]; then printf '%s' "$FIREBASE_CONFIG_JS" > firebase-config.js; echo "Using firebase-config.js from secret."; else echo "No FIREBASE_CONFIG_JS secret; using firebase-config.example.js."; fi
+        env:
+          FIREBASE_CONFIG_JS: ${{ secrets.FIREBASE_CONFIG_JS }}
+
+      - name: Build web assets
+        run: npm run build:web
+
+      - name: Prepare and sync Android project
+        run: node scripts/android-prepare.mjs
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk WeatherGPT-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WeatherGPT-debug-apk
+          path: WeatherGPT-debug.apk
+          if-no-files-found: error
+
+      - name: Attach APK to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: gh release create "$GITHUB_REF_NAME" WeatherGPT-debug.apk --generate-notes || gh release upload "$GITHUB_REF_NAME" WeatherGPT-debug.apk --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

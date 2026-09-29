@@ -1,9 +1,11 @@
-const CACHE_NAME = "weathergpt-shell-v1";
+const CACHE_NAME = "weathergpt-shell-v2";
 const APP_FILES = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
+  "./agent-core.js",
+  "./local-agent.js",
   "./site.webmanifest",
   "./icon.svg",
   "./node_modules/leaflet/dist/leaflet.js",

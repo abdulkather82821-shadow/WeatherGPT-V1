@@ -1,4 +1,10 @@
+const { runAgent, buildAgentSystemPrompt } = require("./ai-agent");
+const { createToolExecutor, TOOL_SCHEMAS } = require("./agent-core");
+
 const PROVIDERS = ["gemini", "openai", "anthropic"];
+const AGENT_CALL_TIMEOUT_MS = 25_000;
+const AGENT_TOTAL_BUDGET_MS = 50_000;
+const AGENT_MODES = ["general", "farm", "aviation", "marine"];
 const MAX_MESSAGE_CHARS = 4000;
 const MAX_HISTORY_MESSAGES = 12;
 const MAX_HISTORY_CHARS = 6000;
@@ -41,7 +47,7 @@ function validateChatInput(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw invalidArgument("A chat request object is required.");
   }
-  const allowedKeys = new Set(["question", "location", "language", "history", "provider", "model"]);
+  const allowedKeys = new Set(["question", "location", "language", "history", "provider", "model", "agent", "units", "mode"]);
   if (Object.keys(input).some((key) => !allowedKeys.has(key))) {
     throw invalidArgument("The request contains unsupported fields.");
   }
@@ -79,6 +85,17 @@ function validateChatInput(input) {
   if (typeof provider !== "string" || (provider !== "auto" && !PROVIDERS.includes(provider))) {
     throw invalidArgument("provider must be auto, gemini, openai, or anthropic.");
   }
+  if (input.agent !== undefined && typeof input.agent !== "boolean") {
+    throw invalidArgument("agent must be true or false.");
+  }
+  const units = input.units === undefined ? "celsius" : input.units;
+  if (units !== "celsius" && units !== "fahrenheit") {
+    throw invalidArgument("units must be celsius or fahrenheit.");
+  }
+  const mode = input.mode === undefined ? "general" : input.mode;
+  if (!AGENT_MODES.includes(mode)) {
+    throw invalidArgument("mode must be general, farm, aviation, or marine.");
+  }
   const model = input.model;
   if (model !== undefined && (typeof model !== "string" || !model.trim() || model.length > 120)) {
     throw invalidArgument("model must be a configured model identifier.");
@@ -114,6 +131,9 @@ function validateChatInput(input) {
     language,
     provider,
     model: model?.trim(),
+    agent: input.agent !== false,
+    units,
+    mode,
     latitude: input.latitude,
     longitude: input.longitude,
     history: cleanHistory
@@ -393,7 +413,8 @@ function createAiGateway({ db, HttpsError, FieldValue, getSecret, fetchImpl = fe
         id: provider.id,
         name: provider.name,
         models: provider.models.map(({ id, label }) => ({ id, name: label }))
-      }))
+      })),
+      agent: { enabled: true, tools: TOOL_SCHEMAS.map((tool) => tool.name) }
     };
   }
 
@@ -415,6 +436,7 @@ function createAiGateway({ db, HttpsError, FieldValue, getSecret, fetchImpl = fe
     let inputTokens = 0;
     let outputTokens = 0;
     let costUsdEstimated = 0;
+    let toolCalls = 0;
     let succeeded = false;
     try {
       const weather = await fetchWeather(
@@ -424,7 +446,16 @@ function createAiGateway({ db, HttpsError, FieldValue, getSecret, fetchImpl = fe
         fetchImpl
       );
       const messages = [...input.history, { role: "user", content: input.question }];
-      const system = buildSystemPrompt(weather, input.language);
+      const system = input.agent
+        ? buildAgentSystemPrompt({
+          weather,
+          language: input.language,
+          location: input.location,
+          units: input.units,
+          mode: input.mode,
+          nowIso: now().toISOString()
+        })
+        : buildSystemPrompt(weather, input.language);
       const errors = [];
       let result;
       for (const candidate of providerOrder) {
@@ -434,18 +465,35 @@ function createAiGateway({ db, HttpsError, FieldValue, getSecret, fetchImpl = fe
             errors.push({ status: 503 });
             continue;
           }
-          result = await providers[candidate.provider]({
-            apiKey,
-            model: candidate.model.id,
-            system,
-            messages,
-            signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS)
-          });
+          if (input.agent) {
+            const executor = createToolExecutor({
+              fetchImpl,
+              context: { location: input.location, units: input.units, language: input.language }
+            });
+            result = await runAgent({
+              provider: candidate.provider,
+              apiKey,
+              model: candidate.model.id,
+              system,
+              messages,
+              executor,
+              fetchImpl,
+              makeSignal: () => AbortSignal.timeout(Math.max(1_000, Math.min(AGENT_CALL_TIMEOUT_MS, AGENT_TOTAL_BUDGET_MS - (Date.now() - startedAt))))
+            });
+          } else {
+            result = await providers[candidate.provider]({
+              apiKey,
+              model: candidate.model.id,
+              system,
+              messages,
+              signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS)
+            });
+          }
           providerUsed = candidate.provider;
           modelUsed = candidate.model;
           break;
         } catch (error) {
-          errors.push({ status: error instanceof ProviderError ? error.status : 0 });
+          errors.push({ status: error instanceof ProviderError || error?.name === "ProviderError" ? error.status : 0 });
         }
       }
       if (!result) {
@@ -458,12 +506,14 @@ function createAiGateway({ db, HttpsError, FieldValue, getSecret, fetchImpl = fe
       inputTokens = result.inputTokens ?? estimateTokens(`${system}\n${JSON.stringify(messages)}`);
       outputTokens = result.outputTokens ?? estimateTokens(result.text);
       costUsdEstimated = estimateCost(inputTokens, outputTokens, modelUsed);
+      toolCalls = result.toolCalls || 0;
       succeeded = true;
       return {
         answer: result.text,
         provider: providerUsed,
         model: modelUsed.id,
-        weather: { source: weather.source, updatedAt: weather.current.time }
+        weather: { source: weather.source, updatedAt: weather.current.time },
+        agent: { enabled: input.agent, steps: result.steps || [], toolCalls }
       };
     } catch (error) {
       if (error instanceof HttpsError) throw error;
@@ -479,6 +529,7 @@ function createAiGateway({ db, HttpsError, FieldValue, getSecret, fetchImpl = fe
         costUsdEstimated,
         provider: providerUsed,
         succeeded,
+        toolCalls,
         FieldValue
       });
     }
@@ -529,6 +580,7 @@ async function recordUsage(refs, usage) {
     inputTokens: FieldValue.increment(usage.inputTokens),
     outputTokens: FieldValue.increment(usage.outputTokens),
     costUsdEstimated: FieldValue.increment(usage.costUsdEstimated),
+    toolCalls: FieldValue.increment(usage.toolCalls || 0),
     successes: FieldValue.increment(usage.succeeded ? 1 : 0),
     failures: FieldValue.increment(usage.succeeded ? 0 : 1),
     lastLatencyMs: usage.latencyMs,
@@ -552,6 +604,7 @@ module.exports = {
   estimateCost,
   estimateTokens,
   fetchWeather,
+  createToolExecutor,
   isValidTimezone,
   normalizeConfig,
   projectWeather,
