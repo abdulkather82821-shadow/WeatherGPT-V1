@@ -1,5 +1,11 @@
 # WeatherGPT AI Gateway setup
 
+## Agent mode
+
+`chat` runs a tool-calling **agent loop** by default (`agent: true`). The model can call the Open-Meteo tools defined in `functions/agent-core.js` (`get_weather`, `get_air_quality`, `compare_places`, `rate_activity`, `get_climate_history`, `get_marine_conditions`, `search_place`) for up to 5 model rounds and 8 tool calls per question. The server executes the tools itself; models never receive network access, keys or arbitrary URLs. Send `agent: false` for the classic single-call answer. Optional request fields: `units` (`celsius` | `fahrenheit`) and `mode` (`general` | `farm` | `aviation` | `marine`).
+
+The response gains `agent: { enabled, steps: [{ tool, label, args, status, summary, ms }], toolCalls }` so clients can show a tool trace. Usage metrics additionally count `toolCalls`; prompt and tool bodies are still never stored. Each agent call can take several model round trips, so `vercel.json` raises the function `maxDuration` to 60 s for `api/ai/*` (the client aborts at 60 s; each provider call is capped at 25 s and the whole agent run at 50 s). Estimated cost per answer is higher than in classic mode because tool results are fed back to the model — consider raising per-model prices/limits accordingly.
+
 ## Vercel deployment (Firebase Spark)
 
 The root `api/ai/models.js` and `api/ai/chat.js` routes run the existing gateway on Vercel, so Firebase Cloud Functions and a Firebase Blaze billing plan are not required for AI chat. Keep Firebase Authentication, App Check, and Firestore in the same Firebase project. The Vercel API verifies Firebase ID tokens and App Check tokens with the Firebase Admin SDK, reads the private Firestore model catalog, and records per-user request and aggregate usage limits.

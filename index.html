@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f4f7f3">
     <meta name="description" content="WeatherGPT brings forecasts, weather guidance and climate context into one friendly conversation.">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com/recaptcha/ https://www.google.com/recaptcha/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https://*.tile.openstreetmap.org https://*.rainviewer.com https://fonts.gstatic.com https://www.google.com; connect-src 'self' https://api.open-meteo.com https://geocoding-api.open-meteo.com https://archive-api.open-meteo.com https://air-quality-api.open-meteo.com https://marine-api.open-meteo.com https://api.rainviewer.com https://*.tile.openstreetmap.org https://*.googleapis.com https://*.firebaseapp.com https://*.firebaseio.com https://*.cloudfunctions.net https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firebaseinstallations.googleapis.com https://firebaseappcheck.googleapis.com https://recaptchaenterprise.googleapis.com https://www.google.com https://www.gstatic.com; frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://www.google.com https://recaptcha.google.com; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com/recaptcha/ https://www.google.com/recaptcha/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https://*.tile.openstreetmap.org https://*.rainviewer.com https://fonts.gstatic.com https://www.google.com; connect-src 'self' https://api.open-meteo.com https://geocoding-api.open-meteo.com https://archive-api.open-meteo.com https://air-quality-api.open-meteo.com https://marine-api.open-meteo.com https://api.rainviewer.com https://*.tile.openstreetmap.org https://*.googleapis.com https://*.firebaseapp.com https://*.firebaseio.com https://*.cloudfunctions.net https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firebaseinstallations.googleapis.com https://firebaseappcheck.googleapis.com https://recaptchaenterprise.googleapis.com https://www.google.com https://www.gstatic.com https://weather-gpt-v1.vercel.app; frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://www.google.com https://recaptcha.google.com; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests">
     <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
     <meta http-equiv="Permissions-Policy" content="camera=(), microphone=(self), geolocation=(self), payment=(), usb=()">
     <meta name="mobile-web-app-capable" content="yes">
@@ -125,10 +125,35 @@
           <article class="vital-card"><span class="vital-icon">◉</span><div><small>PM2.5</small><strong id="pm25">-- µg/m³</strong></div></article>
         </section>
 
+        <section class="vitals-grid vitals-extra" aria-label="More live conditions">
+          <article class="vital-card"><span class="vital-icon">💧</span><div><small>DEW POINT</small><strong id="dew-point">--</strong></div></article>
+          <article class="vital-card"><span class="vital-icon">💨</span><div><small>WIND GUSTS</small><strong id="wind-gust">-- km/h</strong></div></article>
+          <article class="vital-card"><span class="vital-icon">☁</span><div><small>CLOUD COVER</small><strong id="cloud-cover">--%</strong></div></article>
+          <article class="vital-card"><span class="vital-icon">🌧</span><div><small>RAIN NEXT 24H</small><strong id="rain-24h">-- mm</strong></div></article>
+          <article class="vital-card"><span class="vital-icon">🌡</span><div><small>COMFORT</small><strong id="comfort-level">--</strong></div></article>
+          <article class="vital-card"><span class="vital-icon">🧴</span><div><small>SUNBURN TIME</small><strong id="uv-burn">--</strong></div></article>
+        </section>
+
         <section class="hourly-section">
           <div class="section-heading"><div><p class="eyebrow">HOUR BY HOUR</p><h2>Next 24 hours</h2></div><span class="source-chip" id="data-updated">Open-Meteo · Live forecast</span></div>
           <p class="rain-countdown" id="rain-countdown">Rain timing updates with the hourly forecast.</p>
           <div class="hourly-strip" id="hourly-strip"><div class="forecast-loading">Loading hourly forecast…</div></div>
+        </section>
+
+        <section class="briefing-card" id="briefing-card" aria-label="Today's briefing">
+          <div class="section-heading"><div><p class="eyebrow">AGENT BRIEFING · LIVE DATA</p><h2>Today's briefing</h2></div><div class="briefing-actions"><button class="text-button" id="briefing-share" type="button">Share ↗</button><button class="text-button" id="briefing-ask" type="button">Plan my day with the agent ↗</button></div></div>
+          <div class="briefing-grid" id="briefing-grid"><div class="forecast-loading">Preparing your briefing…</div></div>
+        </section>
+
+        <section class="activity-card settings-card" id="activity-planner" aria-label="Activity planner">
+          <div class="feed-heading"><div><p class="eyebrow">ACTIVITY PLANNER · HOUR BY HOUR</p><h2>When is the best time to…</h2></div><span class="source-chip">Open-Meteo · heuristic</span></div>
+          <div class="activity-controls">
+            <label>Activity<select id="activity-select"><option value="walking">🚶 Walking</option><option value="running">🏃 Running</option><option value="cycling">🚴 Cycling</option><option value="picnic">🧺 Picnic</option><option value="cricket">🏏 Cricket / football</option><option value="photography">📷 Photography</option><option value="stargazing">🔭 Stargazing</option><option value="laundry">👕 Drying laundry</option><option value="commute">🚗 Commute / driving</option><option value="spraying">🌾 Crop spraying</option><option value="beach">🏖 Beach / swimming</option><option value="wedding">🎪 Outdoor event</option></select></label>
+            <label>Day<select id="activity-day"><option value="0">Today</option></select></label>
+          </div>
+          <div class="activity-summary" id="activity-summary" aria-live="polite">Load the forecast to score your activity.</div>
+          <div class="activity-bars" id="activity-bars" role="img" aria-label="Suitability score by hour"></div>
+          <div class="activity-footer"><small>Scores (0–100) weigh temperature, rain, wind, UV, humidity, daylight and air quality. Guidance only — not a safety guarantee.</small><button class="text-button" id="activity-ask" type="button">Ask the agent ↗</button></div>
         </section>
 
         <section class="hero-assist-card">
@@ -170,16 +195,22 @@
         </div>
 
         <div class="tab-panel" id="tab-gpt">
-        <section class="tab-intro"><p class="eyebrow">YOUR WEATHER COMPANION</p><h1>Ask WeatherGPT<span class="wave">✳</span></h1><p>Weather answers grounded in local forecast data.</p></section>
+        <section class="tab-intro"><p class="eyebrow">YOUR WEATHER AGENT</p><h1>Ask WeatherGPT<span class="wave">✳</span></h1><p>An AI agent that plans, calls live weather tools and shows its work — for any place on Earth.</p></section>
         <section class="mode-picker"><span>ADVISORY MODE</span><div class="mode-options"><button class="mode-option active" type="button" data-mode="general">Everyday</button><button class="mode-option" type="button" data-mode="farm">🌾 Farm</button><button class="mode-option" type="button" data-mode="aviation">✈ Aviation</button><button class="mode-option" type="button" data-mode="marine">⚓ Marine</button></div></section>
         <section class="mode-insight" id="mode-insight"><span>✳</span><div><strong id="mode-insight-title">Live conditions for your location</strong><p id="mode-insight-copy">Ask a question to get a forecast-grounded answer.</p></div></section>
         <section class="chat-section" id="chat">
-          <div class="chat-heading"><div class="chat-heading-icon">✳</div><div><h2 data-i18n="askWeatherGPT">Ask WeatherGPT</h2><p data-i18n="chatDescription">Your personal weather companion, ready when you are.</p></div><span class="online-pill" id="assistant-mode-label">LOCAL GUIDANCE</span></div>
+          <div class="chat-heading"><div class="chat-heading-icon">✳</div><div><h2 data-i18n="askWeatherGPT">Ask WeatherGPT</h2><p data-i18n="chatDescription">Your personal weather companion, ready when you are.</p></div><span class="online-pill" id="assistant-mode-label">LOCAL AGENT</span></div>
           <div class="assistant-model-controls"><label>Provider<select id="ai-provider-select" disabled><option value="auto">Auto</option></select></label><label>Model<select id="ai-model-select" disabled><option value="auto">Automatic</option></select></label><span id="ai-gateway-status" role="status">Sign in to check available AI models.</span></div>
           <div class="chat-history-tools"><label class="sr-only" for="chat-history-search">Search saved conversations</label><input id="chat-history-search" type="search" placeholder="Search your saved chats" autocomplete="off"><div id="chat-history-list" aria-live="polite"></div></div>
+          <div class="agent-tools" id="agent-tools" aria-label="Agent tools"><span class="agent-tools-label">TOOLS</span><span class="tool-chip" title="Live forecast, 2-hour rain nowcast, 16-day outlook">☂ Forecast</span><span class="tool-chip" title="US AQI, PM2.5, ozone and health guidance">🫁 Air quality</span><span class="tool-chip" title="Side-by-side weather for up to 4 places">⇄ Compare</span><span class="tool-chip" title="Hour-by-hour suitability scoring for 12 activities">🏃 Activity planner</span><span class="tool-chip" title="A full year of ERA5 history for any place">▤ Climate history</span><span class="tool-chip" title="Wave height, swell and sea temperature">⚓ Marine</span><span class="tool-chip" title="Geocoding for any village, city or district">⌖ Place search</span></div>
           <div class="suggestions" id="suggestions">
+            <button class="suggestion" type="button" data-question="Plan my day"><span>✦</span><span>Plan my day</span></button>
             <button class="suggestion" type="button" data-question="Will it rain today?"><span>☂</span><span data-i18n="rainToday">Will it rain today?</span></button>
             <button class="suggestion" type="button" data-question="What should I wear today?"><span>♧</span><span data-i18n="whatToWear">What should I wear?</span></button>
+            <button class="suggestion" type="button" data-question="Best time to run tomorrow?"><span>🏃</span><span>Best time to run</span></button>
+            <button class="suggestion" type="button" data-question="Compare Mumbai and Delhi"><span>⇄</span><span>Compare cities</span></button>
+            <button class="suggestion" type="button" data-question="Is the air quality okay for a walk?"><span>🫁</span><span>Air &amp; walking</span></button>
+            <button class="suggestion" type="button" data-question="Is there any severe weather coming?"><span>⚡</span><span>Severe weather scan</span></button>
             <button class="suggestion" type="button" data-question="Give me the 7-day forecast"><span>▤</span><span data-i18n="weekForecast">The week ahead</span></button>
           </div>
           <div class="chat-messages" id="chat-messages" aria-live="polite"></div>
@@ -257,7 +288,7 @@
             <p class="eyebrow">ACCOUNT &amp; CLOUD SYNC</p><h2 id="account-heading">Sign in or continue as guest</h2>
             <p>Verified accounts can sync a basic profile and conversations securely to their private Firebase account. Weather features remain available in guest mode on this device.</p>
             <div class="account-fields"><label>Name<input id="account-name" type="text" maxlength="80" autocomplete="name" placeholder="Your name"></label><label>Email<input id="account-email" type="email" maxlength="254" autocomplete="email" placeholder="you@example.com"></label><label>Password<input id="account-password" type="password" minlength="8" maxlength="128" autocomplete="current-password" placeholder="At least 8 characters"></label></div>
-            <div class="account-actions"><button class="action-button" id="email-register" type="button" disabled>Create account &amp; verify email</button><button class="action-button" id="email-sign-in" type="button" disabled>Sign in with email</button><button class="location-search-button" id="email-reset" type="button" disabled>Send password reset</button><button class="location-search-button" id="email-verify-resend" type="button" hidden>Resend verification email</button><button class="location-search-button" id="email-verify-refresh" type="button" hidden>I verified my email</button><button class="location-search-button" id="account-delete" type="button" hidden>Delete account</button></div>
+            <div class="account-actions"><button class="action-button" id="email-register" type="button" disabled>Create account &amp; verify email</button><button class="action-button" id="email-sign-in" type="button" disabled>Sign in with email</button><button class="location-search-button" id="email-reset" type="button" disabled>Send password reset</button><button class="location-search-button" id="email-verify-resend" type="button" hidden>Resend verification email</button><button class="location-search-button" id="email-verify-refresh" type="button" hidden>I verified my email</button><button class="location-search-button" id="guest-sign-in" type="button" disabled>Continue as guest</button><button class="location-search-button" id="account-sign-out" type="button" hidden>Sign out</button><button class="location-search-button" id="account-delete" type="button" hidden>Delete account</button></div>
             <p id="account-status" role="status" aria-live="polite">Firebase account services are not configured yet.</p>
           </section>
           <section class="settings-card location-settings"><div class="feed-heading"><div><p class="eyebrow">FORECAST LOCATIONS</p><h2>Saved places</h2></div><button class="action-button" id="save-current-location" type="button">＋ Save this place</button></div><div id="saved-locations-list"></div><button class="action-button compare-button" id="compare-saved-locations" type="button">Compare saved places</button><div id="locations-compare" class="locations-compare" aria-live="polite"></div><button class="location-search-button" id="profile-add-location" type="button">⌕ Search for a city, district or village</button><button class="location-search-button" id="use-my-location" type="button">◎ Use my current location</button><p id="location-accuracy" role="status">Forecasts use the selected city or GPS coordinates; street-level address data is not connected.</p></section>
@@ -289,7 +320,7 @@
             </div>
             <p class="email-provider-note">Email sending requires your Firebase project plus an approved Resend sender address/API key. Server email secrets belong in Firebase Secret Manager—not in this app or source control.</p>
           </section>
-          <section class="settings-card voice-settings"><p class="eyebrow">VOICE ACCESSIBILITY</p><h2>Voice responses</h2><p>Speak WeatherGPT answers using your Android or browser text-to-speech engine. The voice list is supplied by your device; available style and gender vary by installed voices.</p><label class="toggle-row"><input id="voice-responses" type="checkbox"><span>Read answers aloud</span></label><label class="setting-row"><span><strong>Voice</strong><small>Device voices for the selected language</small></span><select id="voice-select"><option value="auto">Device default</option></select></label><label class="setting-row"><span><strong>Speech speed</strong><small>Adjust spoken answer speed</small></span><input id="voice-rate" type="range" min="0.7" max="1.3" step="0.1" value="1"></label><label class="setting-row"><span><strong>Voice volume</strong></span><input id="voice-volume" type="range" min="0" max="1" step="0.1" value="1"></label><button class="location-search-button" id="speech-stop" type="button">Stop speaking</button></section>
+          <section class="settings-card voice-settings"><p class="eyebrow">VOICE ACCESSIBILITY</p><h2>Voice responses</h2><p>Speak WeatherGPT answers using your Android or browser text-to-speech engine. The voice list is supplied by your device; available style and gender vary by installed voices.</p><label class="toggle-row"><input id="voice-responses" type="checkbox"><span>Read answers aloud</span></label><label class="setting-row"><span><strong>Voice</strong><small>Device voices for the selected language</small></span><select id="voice-select"><option value="auto">Device default</option></select></label><label class="setting-row"><span><strong>Speech speed</strong><small>Adjust spoken answer speed</small></span><input id="voice-rate" type="range" min="0.7" max="1.3" step="0.1" value="1"></label><label class="setting-row"><span><strong>Voice volume</strong></span><input id="voice-volume" type="range" min="0" max="1" step="0.1" value="1"></label><button class="location-search-button" id="voice-test" type="button">Test built-in voice</button><button class="location-search-button" id="speech-stop" type="button">Stop speaking</button><p id="voice-device-status" role="status" aria-live="polite"></p></section>
           <section class="settings-card limitations-card"><strong>Data source transparency</strong><p>Live forecast, geocoding, air-quality and historical information are retrieved from Open-Meteo. Rain radar imagery is supplied by RainViewer. Verified official storm/flood alert feeds, GFS/WRF, METAR/TAF, river levels, and app push services are not yet integrated. Email alerts, once configured, are forecast guidance—not official alerts.</p></section>
         </div>
         <footer class="footer"><span>WeatherGPT <span class="footer-dot">·</span> <span data-i18n="builtForEveryone">Weather intelligence for everyone</span></span><span><span class="footer-live"></span><span data-i18n="servicesOperational">Weather services operational</span></span></footer>
@@ -314,6 +345,8 @@
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="firebase-config.js"></script>
     <script src="firebase-client.js"></script>
+    <script src="agent-core.js"></script>
+    <script src="local-agent.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

@@ -92,6 +92,7 @@ const state = {
   voiceQuestionPending: false,
   locationAccuracy: null,
   fieldCrop: readStorage("wg-field-crop", "general"), fieldStage: readStorage("wg-field-stage", "land-preparation"),
+  localAgent: null, briefing: null, activity: readStorage("wg-activity", "walking"),
   mode: "general", currentTab: "home", forecastDays: 7, map: null, mapMarker: null, radarLayer: null,
   mapWeatherMarkers: [], mapRequestId: 0, mapUpdateTimeout: null,
   mapWeatherLayer: "temperature", radarFrames: null, radarLoaded: false, toastTimeout: null
@@ -204,6 +205,10 @@ function renderWeather(data) {
   }
   renderForecast(daily);
   renderHourly(data.hourly, current);
+  applyNowcast(data);
+  renderExtraVitals(data);
+  renderBriefing();
+  renderActivityPlanner();
   renderAdvisory(current, daily);
   updateMapLocation();
   updateAgriculturePanel(current, daily);
@@ -251,6 +256,8 @@ function renderAirQuality(data) {
     state.air = null;
     setText("air-quality", "Unavailable");
     setText("pm25", "-- µg/m³");
+    renderBriefing();
+    renderActivityPlanner();
     return;
   }
   state.air = air;
@@ -258,6 +265,8 @@ function renderAirQuality(data) {
   const category = index <= 50 ? "Good" : index <= 100 ? "Moderate" : index <= 150 ? "Sensitive groups" : index <= 200 ? "Unhealthy" : index <= 300 ? "Very unhealthy" : "Hazardous";
   setText("air-quality", `${category} · ${index}`);
   setText("pm25", Number.isFinite(air.pm2_5) ? `${Math.round(air.pm2_5)} µg/m³` : "-- µg/m³");
+  renderBriefing();
+  renderActivityPlanner();
 }
 
 function renderAdvisory(current, daily) {
@@ -322,13 +331,7 @@ async function loadWeather() {
   setText("air-quality", "Loading…");
   setText("pm25", "-- µg/m³");
   try {
-    const params = new URLSearchParams({
-      latitude: location.latitude, longitude: location.longitude, timezone: location.timezone || "auto",
-      forecast_days: "16", temperature_unit: "celsius", wind_speed_unit: "kmh", precipitation_unit: "mm",
-      current: "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,wind_speed_10m,wind_direction_10m,pressure_msl,surface_pressure,visibility,uv_index",
-      hourly: "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation_probability,precipitation,wind_speed_10m,wind_direction_10m,uv_index,weather_code",
-      daily: "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max,precipitation_sum"
-    });
+    const params = new URLSearchParams(window.WeatherGPTAgentCore.forecastParams(location, 16));
     const response = await fetch(`${API}?${params}`);
     if (requestId !== state.weatherRequestId) return;
     if (!response.ok) throw new Error(`Weather service returned ${response.status}`);
@@ -419,25 +422,55 @@ async function findLocation(query) {
   await loadWeather();
 }
 
-function addMessage(text, role, isError = false) {
+function addMessage(text, role, isError = false, extras = {}) {
   const message = document.createElement("div");
   message.className = `chat-message ${role}${isError ? " error" : ""}`;
-  const content = document.createElement("span");
-  content.textContent = text;
-  message.append(content);
+  const main = document.createElement("div");
+  main.className = "msg-main";
+  const content = document.createElement("div");
+  content.className = "msg-text";
+  if (role === "assistant") renderRichText(content, text);
+  else content.textContent = text;
+  main.append(content);
   if (role === "assistant" && !isError) {
+    const trace = buildTrace(extras.steps, extras.sourceLabel);
+    if (trace) main.append(trace);
+    const actions = document.createElement("div");
+    actions.className = "agent-followups";
+    if (extras.switchTo) {
+      const place = extras.switchTo;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "followup-chip location-chip";
+      button.textContent = `⌖ Make ${place.name} my location`;
+      button.addEventListener("click", () => { button.disabled = true; switchToLocation(place); });
+      actions.append(button);
+    }
+    for (const followUp of extras.followUps || []) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "followup-chip";
+      button.textContent = followUp;
+      button.addEventListener("click", () => { actions.remove(); sendQuestion(followUp); });
+      actions.append(button);
+    }
+    if (actions.childElementCount) main.append(actions);
+  }
+  message.append(main);
+  if (role === "assistant" && !isError) {
+    const spoken = plainSpeechText(text);
     const replay = document.createElement("button");
     replay.type = "button";
     replay.className = "message-speak";
     replay.textContent = "🔊";
     replay.setAttribute("aria-label", "Read this answer aloud");
     replay.title = "Read this answer aloud";
-    replay.addEventListener("click", () => speakAnswer(text));
+    replay.addEventListener("click", () => speakAnswer(spoken));
     message.append(replay);
+    if (state.voiceResponses && !extras.silent) speakAnswer(spoken);
   }
   $("chat-messages").append(message);
   message.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  if (role === "assistant" && state.voiceResponses) speakAnswer(text);
 }
 
 function createConversationId() {
@@ -604,15 +637,15 @@ function updateModelOptions() {
 
 async function loadAiModels() {
   if (state.emailUser?.isAnonymous) {
-    $("ai-gateway-status").textContent = "AI gateway access requires a verified email account; local weather guidance is available.";
+    $("ai-gateway-status").textContent = "AI model access requires a verified email account; the built-in local agent (live weather tools) is available now.";
     setAssistantModels([]);
-    $("assistant-mode-label").textContent = "LOCAL GUIDANCE";
+    $("assistant-mode-label").textContent = "LOCAL AGENT";
     return;
   }
   if (!state.emailUser?.emailVerified || !window.WeatherGPTFirebase?.configured) {
-    $("ai-gateway-status").textContent = "Sign in after Firebase setup to load administrator-enabled AI models.";
+    $("ai-gateway-status").textContent = "Built-in local agent active. Sign in with a verified account to unlock the AI model agent.";
     setAssistantModels([]);
-    $("assistant-mode-label").textContent = "LOCAL GUIDANCE";
+    $("assistant-mode-label").textContent = "LOCAL AGENT";
     return;
   }
   try {
@@ -620,9 +653,9 @@ async function loadAiModels() {
     setAssistantModels(result?.providers);
     const available = state.aiProviders.length > 0;
     $("ai-gateway-status").textContent = available
-      ? "Configured AI gateway · weather context is fetched securely for each answer."
-      : "No AI provider is enabled by the administrator; local guidance remains available.";
-    $("assistant-mode-label").textContent = available ? "AI GATEWAY" : "LOCAL GUIDANCE";
+      ? "AI agent online · it calls live weather tools (forecast, air quality, compare, activity planner, history, marine) server-side."
+      : "No AI provider is enabled by the administrator; the built-in local agent remains available.";
+    $("assistant-mode-label").textContent = available ? "AI AGENT" : "LOCAL AGENT";
   } catch (error) {
     console.error("AI model list could not be loaded:", error);
     const messages = {
@@ -635,7 +668,7 @@ async function loadAiModels() {
     };
     $("ai-gateway-status").textContent = messages[error?.code] || "AI provider settings are unavailable. Check Vercel deployment and Firebase App Check configuration.";
     setAssistantModels([]);
-    $("assistant-mode-label").textContent = "LOCAL GUIDANCE";
+    $("assistant-mode-label").textContent = "LOCAL AGENT";
   }
 }
 
@@ -1863,58 +1896,344 @@ async function compareSavedLocations() {
   }
 }
 
+/* ---------- Home: extra vitals, briefing, activity planner ---------- */
+
+function renderExtraVitals(data) {
+  const core = window.WeatherGPTAgentCore;
+  if (!core) return;
+  const current = data.current;
+  setText("dew-point", core.isNum(current.dew_point_2m) ? core.fmtTemp(current.dew_point_2m, state.units) : "--");
+  setText("wind-gust", core.isNum(current.wind_gusts_10m) ? `${Math.round(current.wind_gusts_10m)} km/h` : "-- km/h");
+  setText("cloud-cover", core.isNum(current.cloud_cover) ? `${Math.round(current.cloud_cover)}%` : "--%");
+  const rain = core.rainNext24(data);
+  setText("rain-24h", core.isNum(rain.totalMm) ? `${rain.totalMm} mm` : "-- mm");
+  setText("comfort-level", core.comfortLabel(current.apparent_temperature, current.dew_point_2m));
+  const burn = current.is_day === 0 ? null : core.uvBurnMinutes(current.uv_index);
+  setText("uv-burn", current.is_day === 0 ? "Night · none" : burn ? `~${burn} min` : "Low risk");
+}
+
+function applyNowcast(data) {
+  const core = window.WeatherGPTAgentCore;
+  const nowcast = core?.nowcast(data);
+  if (!nowcast || nowcast.state === "dry") return;
+  const element = $("rain-countdown");
+  element.textContent = `${nowcast.text} · 15-minute model nowcast, not radar. ${element.textContent}`;
+}
+
+function renderBriefing() {
+  const core = window.WeatherGPTAgentCore;
+  const grid = $("briefing-grid");
+  if (!core || !state.weather || !grid) return;
+  const items = core.buildBriefing(state.weather, state.air, { units: state.units });
+  state.briefing = items;
+  grid.replaceChildren(...items.map((item) => {
+    const card = document.createElement("article");
+    card.className = `briefing-item tone-${item.tone}`;
+    const icon = document.createElement("span");
+    icon.className = "briefing-icon";
+    icon.textContent = item.icon;
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = item.title;
+    const text = document.createElement("p");
+    text.textContent = item.text;
+    copy.append(title, text);
+    card.append(icon, copy);
+    return card;
+  }));
+}
+
+async function shareBriefing() {
+  if (!state.briefing?.length) { showToast("The briefing is still loading."); return; }
+  const text = `WeatherGPT · ${state.location.name}\n${state.briefing.map((item) => `${item.icon} ${item.title}: ${item.text}`).join("\n")}\n\nForecast guidance from Open-Meteo — not an official warning.`;
+  try {
+    if (navigator.share) { await navigator.share({ title: `Weather briefing · ${state.location.name}`, text }); return; }
+    await navigator.clipboard.writeText(text);
+    showToast("Briefing copied to the clipboard.");
+  } catch (error) {
+    if (error?.name !== "AbortError") showToast("Sharing is not available here. Long-press the briefing to copy it.");
+  }
+}
+
+function refreshActivityDays() {
+  const select = $("activity-day");
+  const days = state.weather?.daily?.time;
+  if (!days?.length) return;
+  const previous = select.value || "0";
+  select.replaceChildren(...days.slice(0, 7).map((date, index) => new Option(index === 0 ? "Today" : index === 1 ? "Tomorrow" : `${window.WeatherGPTAgentCore.weekdayOf(date)}`, String(index))));
+  select.value = [...select.options].some((option) => option.value === previous) ? previous : "0";
+}
+
+function renderActivityPlanner() {
+  const core = window.WeatherGPTAgentCore;
+  if (!core || !state.weather) return;
+  refreshActivityDays();
+  const id = $("activity-select").value;
+  const profile = core.ACTIVITIES[id];
+  const dayOffset = Number($("activity-day").value) || 0;
+  const rating = core.rateActivity(state.weather, id, { dayOffset, aqi: state.air?.us_aqi ?? null });
+  const summary = $("activity-summary");
+  const bars = $("activity-bars");
+  if (!rating || !profile) {
+    summary.textContent = "No forecast hours are left for this day. Pick tomorrow.";
+    bars.replaceChildren();
+    return;
+  }
+  const hours = core.relevantHours(id, rating.hours);
+  const tone = rating.best.score >= 65 ? "good" : rating.best.score >= 45 ? "fair" : "poor";
+  const badge = document.createElement("span");
+  badge.className = `activity-score tone-${tone}`;
+  badge.textContent = String(rating.best.score);
+  const copy = document.createElement("div");
+  const headline = document.createElement("strong");
+  headline.textContent = `${profile.icon} ${rating.verdict} for ${profile.label.toLowerCase()} · ${core.hourLabel(rating.best.start)}–${core.hourLabel(rating.best.end)}`;
+  const detail = document.createElement("p");
+  const worst = hours.reduce((low, hour) => (hour.score < low.score ? hour : low), hours[0]);
+  detail.textContent = `${dayOffset === 0 ? "Right now" : "First hour"}: ${dayOffset === 0 ? rating.scoreNow : hours[0].score}/100. ${worst.score < 45 ? `Least suitable around ${core.hourLabel(worst.time)} (${worst.score}/100).` : "No poor hours in this window."}${state.air?.us_aqi > 100 && dayOffset === 0 ? ` Air quality (AQI ${Math.round(state.air.us_aqi)}) lowers outdoor scores.` : ""}`;
+  copy.append(headline, detail);
+  summary.replaceChildren(badge, copy);
+  bars.replaceChildren(...hours.map((hour) => {
+    const bar = document.createElement("div");
+    const isBest = hour.time >= rating.best.start && hour.time < rating.best.end;
+    bar.className = `activity-bar ${hour.score >= 65 ? "good" : hour.score >= 45 ? "fair" : "poor"}${isBest ? " best" : ""}`;
+    bar.title = `${core.hourLabel(hour.time)} · ${hour.score}/100 · ${core.fmtTemp(hour.temperature, state.units)} · ${hour.rainProbability ?? 0}% rain`;
+    const fill = document.createElement("i");
+    fill.style.height = `${Math.max(6, hour.score)}%`;
+    const label = document.createElement("span");
+    const hourNumber = Number(hour.time.slice(11, 13));
+    label.textContent = hourNumber % 3 === 0 ? core.hourLabel(hour.time).replace(":00", "").replace(" ", "").toLowerCase().replace("am", "a").replace("pm", "p") : "";
+    bar.append(fill, label);
+    return bar;
+  }));
+}
+
+/* ---------- Agent chat: rich text, tool trace, progress ---------- */
+
+function getLocalAgent() {
+  if (!state.localAgent && window.WeatherGPTLocalAgent && window.WeatherGPTAgentCore) {
+    state.localAgent = window.WeatherGPTLocalAgent.createLocalAgent({ fetchImpl: (...args) => window.fetch(...args) });
+  }
+  return state.localAgent;
+}
+
+function appendInline(parent, text) {
+  for (const part of String(text).split(/(\*\*[^*]+\*\*)/g)) {
+    if (!part) continue;
+    if (part.length > 4 && part.startsWith("**") && part.endsWith("**")) {
+      const strong = document.createElement("strong");
+      strong.textContent = part.slice(2, -2);
+      parent.append(strong);
+    } else parent.append(document.createTextNode(part));
+  }
+}
+
+function renderRichText(container, text) {
+  let list = null;
+  let code = null;
+  for (const line of String(text).replace(/\r/g, "").split("\n")) {
+    if (line.trim().startsWith("```")) {
+      if (code) { container.append(code); code = null; } else { code = document.createElement("pre"); code.className = "chat-code"; }
+      list = null;
+      continue;
+    }
+    if (code) { code.textContent += `${code.textContent ? "\n" : ""}${line}`; continue; }
+    const bullet = /^\s*[•\-*]\s+(.*)$/.exec(line);
+    if (bullet) {
+      if (!list) { list = document.createElement("ul"); container.append(list); }
+      const item = document.createElement("li");
+      appendInline(item, bullet[1]);
+      list.append(item);
+      continue;
+    }
+    list = null;
+    if (!line.trim()) continue;
+    const paragraph = document.createElement("p");
+    appendInline(paragraph, line);
+    container.append(paragraph);
+  }
+  if (code) container.append(code);
+}
+
+function plainSpeechText(text) {
+  const lines = [];
+  let inCode = false;
+  for (const line of String(text).split(/\r?\n/)) {
+    if (line.trim().startsWith("```")) { inCode = !inCode; continue; }
+    if (!inCode) lines.push(line.replace(/\*\*/g, "").replace(/^\s*[•\-*]\s+/, ""));
+  }
+  return lines.join(" ").replace(/\s+/g, " ").trim();
+}
+
+function renderStepList(list, steps) {
+  list.replaceChildren();
+  for (const step of steps) {
+    const item = document.createElement("li");
+    item.className = `agent-step ${step.status}`;
+    const icon = document.createElement("span");
+    icon.className = "step-icon";
+    icon.textContent = step.status === "error" ? "✕" : step.status === "running" ? "◌" : "✓";
+    const body = document.createElement("span");
+    body.className = "step-body";
+    const label = document.createElement("strong");
+    label.textContent = step.label || step.tool;
+    body.append(label);
+    if (step.args) body.append(document.createTextNode(` · ${step.args}`));
+    if (step.summary) {
+      const summary = document.createElement("small");
+      summary.textContent = `${step.summary}${step.ms ? ` · ${step.ms} ms` : ""}`;
+      body.append(summary);
+    }
+    item.append(icon, body);
+    list.append(item);
+  }
+}
+
+function buildTrace(steps, sourceLabel) {
+  const toolSteps = (steps || []).filter((step) => step.tool !== "plan");
+  if (!toolSteps.length) return null;
+  const calls = toolSteps.filter((step) => step.tool !== "compute").length;
+  const total = toolSteps.reduce((sum, step) => sum + (step.ms || 0), 0);
+  const details = document.createElement("details");
+  details.className = "agent-trace";
+  const summary = document.createElement("summary");
+  summary.textContent = `🛠 ${calls} tool ${calls === 1 ? "call" : "calls"}${total ? ` · ${(total / 1000).toFixed(1)} s` : ""}${sourceLabel ? ` · ${sourceLabel}` : ""} — show steps`;
+  const list = document.createElement("ol");
+  list.className = "agent-steps";
+  renderStepList(list, steps);
+  details.append(summary, list);
+  return details;
+}
+
+function createAgentProgress(title) {
+  const element = document.createElement("div");
+  element.className = "chat-message assistant agent-progress";
+  const heading = document.createElement("div");
+  heading.className = "progress-title";
+  const dots = document.createElement("span");
+  dots.className = "typing-dots";
+  dots.innerHTML = "<i></i><i></i><i></i>";
+  const label = document.createElement("span");
+  label.textContent = title;
+  heading.append(dots, label);
+  const list = document.createElement("ol");
+  list.className = "agent-steps";
+  element.append(heading, list);
+  $("chat-messages").append(element);
+  element.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  return {
+    setTitle(text) { label.textContent = text; },
+    update(steps) { renderStepList(list, steps); element.scrollIntoView({ block: "nearest" }); },
+    remove() { element.remove(); }
+  };
+}
+
+function switchToLocation(place) {
+  state.location = { name: place.name, country: place.country || "", latitude: place.latitude, longitude: place.longitude, timezone: place.timezone || "auto" };
+  state.locationAccuracy = null;
+  setText("location-accuracy", "Selected forecast-grid location · street-level address lookup is unavailable");
+  saveSignedInProfile();
+  showToast(`Location set to ${place.name}.`);
+  return loadWeather();
+}
+
+function askAgent(question) {
+  setActiveTab("gpt");
+  return sendQuestion(question);
+}
+
+function locationAliasSearch(text) {
+  return locationAliases.find((entry) => entry.aliases.includes(text))?.search || null;
+}
+
+async function runLocalAgent(question, progress) {
+  const agent = getLocalAgent();
+  if (!agent || (state.language !== "en" && !/^[\x00-\x7F]+$/.test(question))) return null;
+  return agent.run(question, {
+    location: state.location, units: state.units, language: "en", mode: state.mode, crop: state.fieldCrop,
+    cache: { weather: state.weather, air: state.air }, alias: locationAliasSearch,
+    savedNames: state.savedLocations.map((place) => place.name)
+  }, { onStep: (step, steps) => progress.update(steps) });
+}
+
 async function sendQuestion(question) {
   const cleanQuestion = question.trim();
   if (!cleanQuestion) return;
   addMessage(cleanQuestion, "user");
-  const priorMessages = state.conversationMessages.slice(-10).map(({ role, content }) => ({ role, content }));
+  const priorMessages = state.conversationMessages.slice(-10).map(({ role, content }) => ({ role, content: content.slice(0, 1900) }));
   await persistConversationMessage({ role: "user", content: cleanQuestion, inputType: state.voiceQuestionPending ? "voice" : "text" });
   state.voiceQuestionPending = false;
   $("chat-input").value = "";
   $("chat-input").disabled = true;
+  const gatewayReady = Boolean(state.emailUser?.emailVerified && state.aiProviders.length && state.weather);
+  const progress = createAgentProgress(gatewayReady ? "AI agent is planning and calling live weather tools…" : "Agent is planning…");
   try {
-    const alias = locationAliases.find((entry) => entry.aliases.some((name) => cleanQuestion.includes(name)));
-    const locationMatch = cleanQuestion.match(/\b(?:in|for|at|near)\s+([a-zA-Z][a-zA-Z .'-]{1,45}?)(?:\s+(?:today|tomorrow|this week|next week|this weekend|on the weekend))?[?.!,;:]*$/i);
-    if (alias) await findLocation(alias.search);
-    else if (locationMatch && !/^(?:today|tomorrow|week|forecast|rain|weather|climate)\b/i.test(locationMatch[1].trim())) await findLocation(locationMatch[1].trim());
     let reply;
     let replyMetadata = {};
-    if (state.emailUser?.emailVerified && state.aiProviders.length && state.weather) {
+    let extras = {};
+    let gatewayFailed = false;
+    if (gatewayReady) {
+      const payload = {
+        question: cleanQuestion, location: state.location, language: state.language, history: priorMessages,
+        provider: state.selectedProvider, model: state.selectedModel
+      };
       try {
-        const result = await window.WeatherGPTFirebase.chatWithWeatherGPT({
-          question: cleanQuestion,
-          location: state.location,
-          language: state.language,
-          history: priorMessages,
-          provider: state.selectedProvider,
-          model: state.selectedModel
-        });
+        let result;
+        try {
+          result = await window.WeatherGPTFirebase.chatWithWeatherGPT({ ...payload, agent: true, units: state.units, mode: state.mode });
+        } catch (error) {
+          // A gateway deployed before the agent upgrade rejects the new fields; retry in classic mode.
+          if (/unsupported fields/i.test(error?.message || "")) result = await window.WeatherGPTFirebase.chatWithWeatherGPT(payload);
+          else throw error;
+        }
         reply = result.answer;
-        replyMetadata = { provider: result.provider, model: result.model };
-        $("ai-gateway-status").textContent = `Answered by ${result.provider} · ${result.model}; live weather ${result.weather?.updatedAt || "retrieved by gateway"}.`;
+        const steps = Array.isArray(result.agent?.steps) ? result.agent.steps : [];
+        replyMetadata = { provider: String(result.provider).slice(0, 40), model: String(result.model).slice(0, 80) };
+        extras = { steps, sourceLabel: `${result.provider} · ${result.model}` };
+        $("ai-gateway-status").textContent = `Answered by ${result.provider} · ${result.model}${steps.length ? ` with ${steps.length} tool ${steps.length === 1 ? "call" : "calls"}` : ""}; live weather ${result.weather?.updatedAt || "retrieved by gateway"}.`;
       } catch (error) {
         console.error("AI gateway request failed:", error);
-        const localReply = answerQuestion(cleanQuestion);
-        reply = localReply === null ? "I could not reach the configured AI provider, and this question needs historical climate data. Please use the climate charts when available." : `The AI service is temporarily unavailable. Local Open-Meteo forecast guidance (not an AI response): ${localReply}`;
-        replyMetadata = { provider: "local", model: "forecast-rules" };
-        $("ai-gateway-status").textContent = "AI unavailable; this answer uses local forecast guidance.";
+        gatewayFailed = true;
+        $("ai-gateway-status").textContent = "AI unavailable; the built-in agent answered with live tools instead.";
       }
-    } else {
-      reply = answerQuestion(cleanQuestion);
+    }
+    if (!reply) {
+      try {
+        progress.setTitle("Built-in agent is calling live weather tools…");
+        const local = await runLocalAgent(cleanQuestion, progress);
+        if (local?.handled) {
+          reply = `${gatewayFailed ? "The AI service is temporarily unavailable, so the built-in WeatherGPT agent answered from live Open-Meteo tools.\n\n" : ""}${local.text}`;
+          replyMetadata = { provider: "local", model: "local-agent" };
+          extras = { steps: local.steps, sourceLabel: "built-in agent", followUps: local.followUps, switchTo: local.switchTo };
+        }
+      } catch (error) {
+        console.error("Local agent failed:", error);
+      }
+    }
+    if (!reply) {
+      const alias = locationAliases.find((entry) => entry.aliases.some((name) => cleanQuestion.includes(name)));
+      const locationMatch = cleanQuestion.match(/\b(?:in|for|at|near)\s+([a-zA-Z][a-zA-Z .'-]{1,45}?)(?:\s+(?:today|tomorrow|this week|next week|this weekend|on the weekend))?[?.!,;:]*$/i);
+      if (alias) await findLocation(alias.search);
+      else if (locationMatch && !/^(?:today|tomorrow|week|forecast|rain|weather|climate)\b/i.test(locationMatch[1].trim())) await findLocation(locationMatch[1].trim());
+      const localReply = answerQuestion(cleanQuestion);
       replyMetadata = { provider: "local", model: "forecast-rules" };
-    }
-    if (reply === null) {
-      if (/last year|previous year|last month|\b(?:19|20)\d{2}\b/.test(cleanQuestion.toLowerCase())) {
-        reply = await answerClimateQuestion(cleanQuestion);
+      if (localReply === null) {
+        if (/last year|previous year|last month|\b(?:19|20)\d{2}\b/.test(cleanQuestion.toLowerCase())) {
+          reply = await answerClimateQuestion(cleanQuestion);
+        } else {
+          setActiveTab("climate");
+          await loadClimateHistory();
+          reply = `I opened the historical climate charts for ${state.location.name}. They use Open-Meteo's historical archive; observations are not forecasts or an official climatological record.`;
+        }
       } else {
-        setActiveTab("climate");
-        await loadClimateHistory();
-        reply = `I opened the historical climate charts for ${state.location.name}. They use Open-Meteo's historical archive; observations are not forecasts or an official climatological record.`;
+        reply = gatewayFailed ? `The AI service is temporarily unavailable. Local Open-Meteo forecast guidance (not an AI response): ${localReply}` : localReply;
       }
+      extras = { followUps: ["Plan my day", "Will it rain today?", "Best time to run tomorrow?"] };
     }
-    addMessage(reply, "assistant");
+    progress.remove();
+    addMessage(reply, "assistant", false, extras);
     await persistConversationMessage({ role: "assistant", content: reply, ...replyMetadata });
   } catch (error) {
+    progress.remove();
     console.error("Unable to answer weather question:", error);
     const fallback = state.weather
       ? "I couldn't complete that answer. Your live forecast remains available on the Home screen; please try again."
@@ -2125,6 +2444,21 @@ function initialize() {
     setActiveTab("home");
     window.setTimeout(() => $("farmer-planner").scrollIntoView({ behavior: "smooth", block: "center" }), 50);
   });
+  $("activity-select").value = Object.hasOwn(window.WeatherGPTAgentCore?.ACTIVITIES || {}, state.activity) ? state.activity : "walking";
+  $("activity-select").addEventListener("change", (event) => {
+    state.activity = event.target.value;
+    storeValue("wg-activity", state.activity);
+    renderActivityPlanner();
+  });
+  $("activity-day").addEventListener("change", renderActivityPlanner);
+  $("activity-ask").addEventListener("click", () => {
+    const label = $("activity-select").selectedOptions[0]?.textContent.replace(/^\S+\s/, "").toLowerCase() || "go outside";
+    const day = Number($("activity-day").value) || 0;
+    const when = day === 0 ? "today" : day === 1 ? "tomorrow" : `on ${$("activity-day").selectedOptions[0].textContent}`;
+    askAgent(`Best time for ${label} ${when}?`);
+  });
+  $("briefing-ask").addEventListener("click", () => askAgent("Plan my day"));
+  $("briefing-share").addEventListener("click", shareBriefing);
   $("add-location").addEventListener("click", promptForLocation);
   $("edit-location").addEventListener("click", promptForLocation);
   $("saved-place").addEventListener("click", () => setActiveTab("profile"));
@@ -2212,7 +2546,7 @@ function initialize() {
   });
   if (Array.isArray(state.conversationMessages)) {
     state.conversationMessages.forEach((message) => {
-      if (["user", "assistant"].includes(message.role) && typeof message.content === "string") addMessage(message.content, message.role);
+      if (["user", "assistant"].includes(message.role) && typeof message.content === "string") addMessage(message.content, message.role, false, { silent: true });
     });
   } else {
     state.conversationMessages = [];
