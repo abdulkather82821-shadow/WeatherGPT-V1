@@ -627,12 +627,13 @@ async function loadAiModels() {
     console.error("AI model list could not be loaded:", error);
     const messages = {
       "functions/failed-precondition": "AI provider settings need a valid App Check token and an enabled provider/model in Firebase.",
-      "functions/not-found": "AI provider settings are unavailable because the gateway functions are not deployed yet.",
+      "functions/not-found": "The Vercel AI gateway route is unavailable. Check that the current deployment includes the /api/ai/models function.",
       "functions/unauthenticated": "Sign in with a verified email account to load AI provider settings.",
       "functions/permission-denied": "AI provider settings are blocked by App Check. Verify Firebase App Check setup for this app.",
-      "functions/unavailable": "The AI gateway is temporarily unavailable. Try loading provider settings again later."
+      "functions/unavailable": "The AI gateway is temporarily unavailable. Try loading provider settings again later.",
+      "functions/internal": "AI provider settings could not load. Check the Vercel server logs and gateway environment variables."
     };
-    $("ai-gateway-status").textContent = messages[error?.code] || "AI provider settings are unavailable. Check the Firebase gateway deployment and App Check configuration.";
+    $("ai-gateway-status").textContent = messages[error?.code] || "AI provider settings are unavailable. Check Vercel deployment and Firebase App Check configuration.";
     setAssistantModels([]);
     $("assistant-mode-label").textContent = "LOCAL GUIDANCE";
   }

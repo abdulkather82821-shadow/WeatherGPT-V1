@@ -4,5 +4,5 @@ window.WEATHERGPT_FIREBASE_CONFIG = {
   projectId: "REPLACE_WITH_FIREBASE_PROJECT_ID",
   appId: "REPLACE_WITH_FIREBASE_WEB_APP_ID",
   recaptchaV3SiteKey: "REPLACE_WITH_RECAPTCHA_V3_SITE_KEY",
-  functionsRegion: "asia-south1"
+  aiGatewayUrl: "https://weather-gpt-v1.vercel.app/api/ai"
 };
