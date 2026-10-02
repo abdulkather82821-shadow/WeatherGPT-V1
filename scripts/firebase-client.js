@@ -1,4 +1,5 @@
 import { Capacitor } from "@capacitor/core";
+import { Geolocation } from "@capacitor/geolocation";
 import { TextToSpeech } from "@capacitor-community/text-to-speech";
 import { FirebaseAppCheck } from "@capacitor-firebase/app-check";
 import { FirebaseAuthentication } from "@capacitor-firebase/authentication";
@@ -7,6 +8,7 @@ import { CustomProvider, ReCaptchaV3Provider, getToken as getAppCheckToken, init
 import {
   EmailAuthProvider,
   GoogleAuthProvider,
+  browserLocalPersistence,
   createUserWithEmailAndPassword,
   deleteUser,
   getAuth,
@@ -70,6 +72,20 @@ async function synchronizeNativeUser() {
   await signInWithCredential(auth, credential);
 }
 
+async function waitForInitialAuthState() {
+  if (typeof auth?.authStateReady === "function") {
+    await auth.authStateReady();
+    return;
+  }
+  await new Promise((resolve, reject) => {
+    let unsubscribeReady = () => {};
+    unsubscribeReady = onAuthStateChanged(auth, () => {
+      unsubscribeReady();
+      resolve();
+    }, reject);
+  });
+}
+
 async function initialize(onUser) {
   userCallback = onUser;
   if (!isConfigured) {
@@ -98,12 +114,24 @@ async function initialize(onUser) {
         isTokenAutoRefreshEnabled: true
       });
     }
-    auth = getAuth(app);
+    try {
+      auth = initializeAuth(app, { persistence: browserLocalPersistence });
+    } catch (error) {
+      if (error.code !== "auth/already-initialized") throw error;
+      auth = getAuth(app);
+    }
   }
   database = getFirestore(app);
   unsubscribeAuth?.();
   unsubscribeAuth = onAuthStateChanged(auth, updateAuthUser);
+  await waitForInitialAuthState();
   if (Capacitor.isNativePlatform()) await synchronizeNativeUser();
+  // Firebase owns token persistence and expiry. Asking for a token here lets its SDK
+  // restore/refresh the active session without copying credentials into app storage.
+  if (auth.currentUser) {
+    try { await auth.currentUser.getIdToken(); }
+    catch (error) { console.info("The saved Firebase session is available; token refresh will retry when the network returns.", error); }
+  }
   return true;
 }
 
@@ -407,5 +435,11 @@ window.WeatherGPTFirebase = {
 
 window.WeatherGPTSpeech = {
   isNative: Capacitor.isNativePlatform(),
+  platform: Capacitor.getPlatform(),
   textToSpeech: TextToSpeech
+};
+
+window.WeatherGPTLocation = {
+  isNative: Capacitor.isNativePlatform(),
+  geolocation: Geolocation
 };

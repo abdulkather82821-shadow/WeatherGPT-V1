@@ -1,11 +1,14 @@
-const CACHE_NAME = "weathergpt-shell-v2";
+const CACHE_NAME = "weathergpt-shell-v4";
 const APP_FILES = [
   "./",
   "./index.html",
+  "./firebase-config.js",
+  "./firebase-client.js",
   "./styles.css",
   "./app.js",
   "./agent-core.js",
   "./local-agent.js",
+  "./offline-cache.js",
   "./site.webmanifest",
   "./icon.svg",
   "./node_modules/leaflet/dist/leaflet.js",

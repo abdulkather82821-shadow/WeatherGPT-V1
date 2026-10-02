@@ -78,22 +78,24 @@ function readStorage(key, fallback) {
   }
 }
 const state = {
-  location: { ...DEFAULT_LOCATION }, weather: null, air: null, marine: null,
-  weatherRequestId: 0, auxiliaryRequestId: 0, language: readStorage("wg-language", "en"),
+  location: readStorage("wg-current-location", { ...DEFAULT_LOCATION }), weather: null, air: null, marine: null,
+  weatherRequestId: 0, auxiliaryRequestId: 0, weatherUpdatedAt: null, weatherStale: false, isWeatherLoading: false,
+  weatherAbortController: null, airAbortController: null, lastWeatherAttemptAt: 0, weatherMonitorTimer: null, freshnessTimer: null,
+  loadedLocationKey: null, locationAccuracy: null,
+  language: readStorage("wg-language", "en"),
   units: readStorage("wg-units", "celsius"), role: readStorage("wg-role", "general"),
   savedLocations: readStorage("wg-locations", []), notifications: readStorage("wg-notifications", { rain: false, storm: false, wind: false, heat: false, cold: false }),
   notificationsEnabled: readStorage("wg-notifications-enabled", false),
   voiceResponses: readStorage("wg-voice-responses", false),
   emailUser: null, emailPreferences: null, emailLocation: null, emailPreferenceRequestId: 0, emailLocationUpdatePending: false,
   conversationId: readStorage("wg-conversation-id", ""), conversationMessages: readStorage("wg-conversation-messages", []),
-  conversations: [], aiProviders: [], selectedProvider: readStorage("wg-ai-provider", "auto"), selectedModel: readStorage("wg-ai-model", "auto"),
-  voiceName: readStorage("wg-voice-name", "auto"), voiceRate: readStorage("wg-voice-rate", 1),
-  voiceVolume: readStorage("wg-voice-volume", 1), voiceRefreshId: 0,
+  conversations: [], aiProviders: [],
+  voiceName: readStorage("wg-voice-name", "auto"), voiceLanguage: readStorage("wg-voice-language", "auto"),
+  voiceRate: readStorage("wg-voice-rate", 1), voiceVolume: readStorage("wg-voice-volume", 1), voiceRefreshId: 0,
   voiceQuestionPending: false,
-  locationAccuracy: null,
   fieldCrop: readStorage("wg-field-crop", "general"), fieldStage: readStorage("wg-field-stage", "land-preparation"),
   localAgent: null, briefing: null, activity: readStorage("wg-activity", "walking"),
-  mode: "general", currentTab: "home", forecastDays: 7, map: null, mapMarker: null, radarLayer: null,
+  mode: "general", currentTab: "home", forecastDays: 7, map: null, mapMarker: null, mapBaseLayer: null, mapTileProvider: null, mapTileErrors: 0, mapFallbackUsed: false, radarLayer: null,
   mapWeatherMarkers: [], mapRequestId: 0, mapUpdateTimeout: null,
   mapWeatherLayer: "temperature", radarFrames: null, radarLoaded: false, toastTimeout: null
 };
@@ -123,6 +125,119 @@ function dayName(date, format = "short") { return new Intl.DateTimeFormat(langua
 function localHour(iso) { return new Intl.DateTimeFormat(languageLocales[state.language] || "en-IN", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: state.location.timezone || "auto" }).format(new Date(iso)); }
 function setText(id, value) { const element = $(id); if (element) element.textContent = value; }
 
+function normalizeLocation(candidate, fallback = DEFAULT_LOCATION) {
+  const latitude = Number(candidate?.latitude);
+  const longitude = Number(candidate?.longitude);
+  if (!candidate || candidate.latitude === "" || candidate.longitude === "" ||
+      !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+      !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    return { ...fallback };
+  }
+  const accuracy = Number(candidate.accuracy);
+  return {
+    name: String(candidate.name || "Weather location").trim().slice(0, 100),
+    country: String(candidate.country || "").trim().slice(0, 100),
+    latitude,
+    longitude,
+    timezone: typeof candidate.timezone === "string" && candidate.timezone.length <= 80 ? candidate.timezone || "auto" : "auto",
+    source: ["gps", "geocoded", "coordinates", "profile"].includes(candidate.source) ? candidate.source : "geocoded",
+    ...(Number.isFinite(accuracy) && accuracy >= 0 ? { accuracy: Math.round(accuracy) } : {})
+  };
+}
+
+function formatLocationCoordinates(location) {
+  const latitude = Number(location.latitude);
+  const longitude = Number(location.longitude);
+  return `${Math.abs(latitude).toFixed(5)}° ${latitude < 0 ? "S" : "N"}, ${Math.abs(longitude).toFixed(5)}° ${longitude < 0 ? "W" : "E"}`;
+}
+
+function locationPrecisionLabel(location) {
+  const accuracy = Number(location.accuracy);
+  if (location.source === "gps") {
+    return Number.isFinite(accuracy) ? `GPS fix ±${Math.round(accuracy)} m · forecast uses a model grid` : "GPS point · reported accuracy unavailable · forecast uses a model grid";
+  }
+  return "Forecast coordinate · model grid; street address not available";
+}
+
+function renderCurrentLocationDetails() {
+  const location = normalizeLocation(state.location);
+  state.location = location;
+  setText("current-coordinates", formatLocationCoordinates(location));
+  setText("saved-coordinates", formatLocationCoordinates(location));
+  setText("current-location-source", locationPrecisionLabel(location));
+  const gpsAccuracy = location.source === "gps" && Number.isFinite(Number(location.accuracy))
+    ? `GPS accuracy: ±${Math.round(Number(location.accuracy))} m · forecast is still model-grid data.`
+    : `${locationPrecisionLabel(location)}.`;
+  setText("location-accuracy", gpsAccuracy);
+}
+
+function formatAge(timestamp) {
+  const elapsed = Math.max(0, Date.now() - Number(timestamp || 0));
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function readWeatherSnapshot(location = state.location) {
+  try { return window.WeatherGPTOfflineCache?.read(location) || null; }
+  catch (error) { console.warn("Offline forecast cache is unavailable:", error); return null; }
+}
+
+function clearOfflineWeatherCache() {
+  try {
+    const key = window.WeatherGPTOfflineCache?.STORAGE_KEY;
+    if (key) localStorage.removeItem(key);
+    updateOfflineCapabilityStatus();
+    showToast("Cached weather snapshots cleared from this device.");
+  } catch (error) {
+    console.error("Unable to clear offline weather snapshots:", error);
+    showToast("The offline weather cache could not be cleared.");
+  }
+}
+
+function updateOfflineCapabilityStatus() {
+  const cached = readWeatherSnapshot();
+  const placeCount = state.savedLocations?.length || 0;
+  const forecast = cached ? `Forecast snapshot saved ${formatAge(cached.weatherSavedAt)}` : "No saved forecast for this place yet";
+  setText("offline-capability-status", `${placeCount} saved ${placeCount === 1 ? "place" : "places"} on this device · ${forecast}. Recent chats and preferences are also stored locally.`);
+}
+
+function updateWeatherFreshness() {
+  const online = typeof navigator === "undefined" || navigator.onLine !== false;
+  const updatedAt = Number(state.weatherUpdatedAt);
+  let label = "Waiting for forecast…";
+  if (state.weather && Number.isFinite(updatedAt)) {
+    label = state.weatherStale || !online
+      ? `${online ? "Cached" : "Offline snapshot"} · ${formatAge(updatedAt)}`
+      : `Live · updated ${formatAge(updatedAt)}`;
+  } else if (!online) label = "Offline · no saved forecast";
+  else if (state.isWeatherLoading) label = "Loading live forecast…";
+  else if (state.lastWeatherAttemptAt) label = "Live forecast unavailable";
+  setText("weather-freshness", label);
+  $("weather-status")?.classList.toggle("offline", !online || state.weatherStale);
+
+  const notice = $("offline-notice");
+  if (!notice) return;
+  if (state.weather && (state.weatherStale || !online) && Number.isFinite(updatedAt)) {
+    notice.hidden = false;
+    notice.textContent = `${online ? "Live refresh unavailable" : "Offline"} · showing the last saved model forecast, updated ${formatAge(updatedAt)}. Reconnect for current conditions; this snapshot is not an official warning.`;
+  } else if (!online) {
+    notice.hidden = false;
+    notice.textContent = "You’re offline. Saved places, settings and recent chats are available; connect to load weather for a new place.";
+  } else if (!state.weather && state.lastWeatherAttemptAt) {
+    notice.hidden = false;
+    notice.textContent = "No saved forecast is available for this place. Connect to the internet and refresh weather.";
+  } else {
+    notice.hidden = true;
+    notice.textContent = "";
+  }
+  updateOfflineCapabilityStatus();
+}
+
 function setLanguage(language) {
   state.language = translations[language] ? language : "en";
   document.documentElement.lang = state.language;
@@ -144,6 +259,7 @@ function setLanguage(language) {
   if (state.weather) renderWeather(state.weather);
   $("language-select").value = state.language;
   refreshAvailableVoices();
+  updateWeatherFreshness();
 }
 
 function getCondition(code) {
@@ -165,6 +281,7 @@ function getCondition(code) {
 
 function renderWeather(data) {
   state.weather = data;
+  renderCurrentLocationDetails();
   const current = data.current;
   const daily = data.daily;
   const today = new Date();
@@ -185,7 +302,7 @@ function renderWeather(data) {
   setText("pressure", `${Math.round(current.pressure_msl)} hPa`);
   setText("visibility", `${Number(current.visibility / 1000).toFixed(1)} km`);
   setText("uv-index", Number(current.uv_index).toFixed(1));
-  setText("data-updated", `Open-Meteo · ${formatShortTime(new Date(current.time))}`);
+  setText("data-updated", `Open-Meteo · ${formatShortTime(new Date(current.time))}${state.weatherStale ? ` · cached ${formatAge(state.weatherUpdatedAt)}` : ""}`);
   setText("map-location", state.location.name);
   const todayRainChance = daily.precipitation_probability_max?.[0] ?? 0;
   setText("rain-chance", `${todayRainChance}%`);
@@ -212,7 +329,7 @@ function renderWeather(data) {
   renderAdvisory(current, daily);
   updateMapLocation();
   updateAgriculturePanel(current, daily);
-  checkNotificationRules(current, daily);
+  if (!state.weatherStale && (typeof navigator === "undefined" || navigator.onLine !== false)) checkNotificationRules(current, daily);
   updateEmailLocationIfSubscribed();
 }
 
@@ -307,77 +424,145 @@ function renderAdvisory(current, daily) {
 }
 
 async function loadWeather() {
+  state.weatherAbortController?.abort();
+  state.airAbortController?.abort();
+  const controller = new AbortController();
+  state.weatherAbortController = controller;
   const requestId = ++state.weatherRequestId;
-  const location = state.location;
-  state.weather = null;
+  const location = normalizeLocation(state.location);
+  state.location = location;
+  const cacheKey = window.WeatherGPTOfflineCache?.locationKey(location) || `${location.latitude},${location.longitude}`;
+  const previousWeather = state.loadedLocationKey === cacheKey ? state.weather : null;
+  const previousAir = state.loadedLocationKey === cacheKey ? state.air : null;
+  const cached = readWeatherSnapshot(location);
+  state.loadedLocationKey = cacheKey;
+  state.isWeatherLoading = true;
+  state.lastWeatherAttemptAt = Date.now();
+  storeValue("wg-current-location", location);
+  renderCurrentLocationDetails();
   setText("current-city", location.name);
   setText("current-region", location.country);
   setText("saved-city", location.name);
   setText("saved-region", location.country);
-  setText("saved-temp", "--°");
-  setText("condition", "Getting your forecast…");
-  setText("temperature", "--°");
-  setText("feels-like", "--°");
-  setText("humidity", "--%");
-  setText("wind", "-- km/h");
-  setText("rain-chance", "--%");
-  setText("sunrise", "--:--");
-  setText("sunset", "--:--");
-  setText("daylight-duration", "Loading daylight hours");
-  setText("alert-count", "0");
-  $("notification-button").classList.remove("has-alert");
-  $("forecast-strip").innerHTML = '<div class="forecast-loading">Loading forecast…</div>';
-  $("hourly-strip").innerHTML = '<div class="forecast-loading">Loading hourly forecast…</div>';
-  setText("air-quality", "Loading…");
-  setText("pm25", "-- µg/m³");
-  try {
-    const params = new URLSearchParams(window.WeatherGPTAgentCore.forecastParams(location, 16));
-    const response = await fetch(`${API}?${params}`);
-    if (requestId !== state.weatherRequestId) return;
-    if (!response.ok) throw new Error(`Weather service returned ${response.status}`);
-    const data = await response.json();
-    if (requestId !== state.weatherRequestId) return;
-    if (!data.current || !data.daily?.time?.length) throw new Error("Weather service returned incomplete forecast data");
-    try { storeValue("wg-current-location", location); } catch (error) { console.error("Unable to save current location:", error); }
-    renderWeather(data);
-    loadAirQuality(location, requestId);
-  } catch (error) {
-    if (requestId !== state.weatherRequestId) return;
-    console.error("Unable to load weather:", error);
-    setText("condition", "Weather data unavailable");
+
+  if (cached?.weather) {
+    state.weather = cached.weather;
+    state.air = cached.air;
+    state.weatherUpdatedAt = cached.weatherSavedAt;
+    state.weatherStale = true;
+    renderWeather(cached.weather);
+    renderAirQuality(cached.air ? { current: cached.air } : null);
+  } else if (previousWeather) {
+    state.weather = previousWeather;
+    state.air = previousAir;
+    state.weatherStale = true;
+    renderWeather(previousWeather);
+    if (previousAir) renderAirQuality({ current: previousAir });
+  } else {
+    state.weather = null;
+    state.air = null;
+    state.weatherUpdatedAt = null;
+    state.weatherStale = false;
+    setText("saved-temp", "--°");
+    setText("condition", "Getting your forecast…");
     setText("temperature", "--°");
     setText("feels-like", "--°");
     setText("humidity", "--%");
     setText("wind", "-- km/h");
     setText("rain-chance", "--%");
-    setText("wind-direction", "--");
-    setText("pressure", "-- hPa");
-    setText("visibility", "-- km");
-    setText("uv-index", "--");
-    setText("air-quality", "Unavailable");
+    setText("sunrise", "--:--");
+    setText("sunset", "--:--");
+    setText("daylight-duration", "Loading daylight hours");
+    setText("alert-count", "0");
+    $("notification-button").classList.remove("has-alert");
+    $("forecast-strip").innerHTML = '<div class="forecast-loading">Loading forecast…</div>';
+    $("hourly-strip").innerHTML = '<div class="forecast-loading">Loading hourly forecast…</div>';
+    setText("air-quality", "Loading…");
     setText("pm25", "-- µg/m³");
-    $("forecast-strip").innerHTML = '<div class="forecast-loading">Forecast unavailable. Check your connection and try again.</div>';
-    setText("advisory-title", "Forecast unavailable");
-    setText("advisory-description", "Could not reach the weather service. Check your connection and try again.");
-    showToast("Weather data could not be loaded. Please check your connection.");
+  }
+  updateWeatherFreshness();
+
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    state.isWeatherLoading = false;
+    updateWeatherFreshness();
+    return;
+  }
+
+  const timeout = window.setTimeout(() => controller.abort(), 20_000);
+  try {
+    const params = new URLSearchParams(window.WeatherGPTAgentCore.forecastParams(location, 16));
+    const response = await fetch(`${API}?${params}`, { signal: controller.signal });
+    if (requestId !== state.weatherRequestId) return;
+    if (!response.ok) throw new Error(`Weather service returned ${response.status}`);
+    const data = await response.json();
+    if (requestId !== state.weatherRequestId) return;
+    if (!data.current || !data.daily?.time?.length) throw new Error("Weather service returned incomplete forecast data");
+    const fetchedAt = Date.now();
+    state.weather = data;
+    state.weatherUpdatedAt = fetchedAt;
+    state.weatherStale = false;
+    state.loadedLocationKey = cacheKey;
+    window.WeatherGPTOfflineCache?.saveWeather(location, data, fetchedAt);
+    renderWeather(data);
+    updateWeatherFreshness();
+    void loadAirQuality(location, requestId);
+  } catch (error) {
+    if (requestId !== state.weatherRequestId) return;
+    console.error("Unable to load weather:", error);
+    state.weatherStale = Boolean(state.weather);
+    if (!state.weather) {
+      setText("condition", "Weather data unavailable");
+      setText("temperature", "--°");
+      setText("feels-like", "--°");
+      setText("humidity", "--%");
+      setText("wind", "-- km/h");
+      setText("rain-chance", "--%");
+      setText("wind-direction", "--");
+      setText("pressure", "-- hPa");
+      setText("visibility", "-- km");
+      setText("uv-index", "--");
+      setText("air-quality", "Unavailable");
+      setText("pm25", "-- µg/m³");
+      $("forecast-strip").innerHTML = '<div class="forecast-loading">Forecast unavailable. Check your connection and try again.</div>';
+      $("hourly-strip").innerHTML = '<div class="forecast-loading">Forecast unavailable.</div>';
+      setText("advisory-title", "Forecast unavailable");
+      setText("advisory-description", "Could not reach the weather service. Check your connection and try again.");
+    }
+    updateWeatherFreshness();
+    showToast(state.weather ? "Live refresh failed. Showing the last saved forecast." : "Weather data could not be loaded. Please check your connection.");
+  } finally {
+    window.clearTimeout(timeout);
+    if (requestId === state.weatherRequestId) {
+      state.isWeatherLoading = false;
+      if (state.weatherAbortController === controller) state.weatherAbortController = null;
+      updateWeatherFreshness();
+    }
   }
 }
 
 async function loadAirQuality(location = state.location, weatherRequestId = state.weatherRequestId) {
+  state.airAbortController?.abort();
+  const controller = new AbortController();
+  state.airAbortController = controller;
+  const timeout = window.setTimeout(() => controller.abort(), 15_000);
   const params = new URLSearchParams({
     latitude: location.latitude, longitude: location.longitude, timezone: location.timezone || "auto",
     current: "us_aqi,european_aqi,pm10,pm2_5,uv_index"
   });
   try {
-    const response = await fetch(`${AIR_API}?${params}`);
+    const response = await fetch(`${AIR_API}?${params}`, { signal: controller.signal });
     if (!response.ok) throw new Error(`Air-quality service returned ${response.status}`);
     const data = await response.json();
     if (weatherRequestId !== state.weatherRequestId) return;
+    if (data.current) window.WeatherGPTOfflineCache?.saveAir(location, data.current, Date.now());
     renderAirQuality(data);
   } catch (error) {
     if (weatherRequestId !== state.weatherRequestId) return;
     console.warn("Air-quality data is unavailable:", error);
-    renderAirQuality(null);
+    if (!state.air) renderAirQuality(null);
+  } finally {
+    window.clearTimeout(timeout);
+    if (state.airAbortController === controller) state.airAbortController = null;
   }
 }
 
@@ -397,9 +582,7 @@ function renderLocationResults(results) {
     detail.textContent = [result.admin2, result.admin1, result.country].filter(Boolean).join(", ");
     button.append(name, detail);
     button.addEventListener("click", async () => {
-      state.location = { name: result.name, country: result.country || result.admin1 || "", latitude: result.latitude, longitude: result.longitude, timezone: result.timezone || "auto" };
-      state.locationAccuracy = null;
-      setText("location-accuracy", "Selected forecast-grid location · street-level address lookup is unavailable");
+      state.location = normalizeLocation({ name: result.name, country: result.country || result.admin1 || "", latitude: result.latitude, longitude: result.longitude, timezone: result.timezone || "auto", source: result.source || "geocoded" });
       saveSignedInProfile();
       $("location-dialog").close();
       try { await loadWeather(); } catch (error) { console.error("Unable to load the selected location:", error); }
@@ -415,9 +598,7 @@ async function findLocation(query) {
   const result = await response.json();
   if (!result.results?.length) throw new Error(`I couldn't find "${query}". Try a nearby city or a different spelling.`);
   const found = result.results[0];
-  state.location = { name: found.name, country: found.country || found.admin1 || "", latitude: found.latitude, longitude: found.longitude, timezone: found.timezone || "auto" };
-  state.locationAccuracy = null;
-  setText("location-accuracy", "Selected forecast-grid location · street-level address lookup is unavailable");
+  state.location = normalizeLocation({ name: found.name, country: found.country || found.admin1 || "", latitude: found.latitude, longitude: found.longitude, timezone: found.timezone || "auto", source: "geocoded" });
   saveSignedInProfile();
   await loadWeather();
 }
@@ -608,67 +789,31 @@ async function loadConversationList() {
     renderConversationList();
   } catch (error) {
     console.error("Unable to load saved conversations:", error);
-    $("chat-history-list").textContent = "Cloud chat history is temporarily unavailable.";
+    state.conversations = [];
+    renderConversationList();
+    if (!readStorage("wg-local-conversations", []).length) {
+      $("chat-history-list").textContent = "Cloud chat history is temporarily unavailable. Conversations saved on this device remain available offline.";
+    }
   }
 }
 
 function setAssistantModels(providers) {
   state.aiProviders = Array.isArray(providers) ? providers : [];
-  const providerSelect = $("ai-provider-select");
-  providerSelect.replaceChildren(new Option("Auto", "auto"));
-  for (const provider of state.aiProviders) providerSelect.add(new Option(provider.name || provider.id, provider.id));
-  if (![...providerSelect.options].some((option) => option.value === state.selectedProvider)) state.selectedProvider = "auto";
-  providerSelect.value = state.selectedProvider;
-  providerSelect.disabled = !state.emailUser?.emailVerified || !state.aiProviders.length;
-  updateModelOptions();
-}
-
-function updateModelOptions() {
-  const providerSelect = $("ai-provider-select");
-  const modelSelect = $("ai-model-select");
-  const provider = state.aiProviders.find((item) => item.id === providerSelect.value);
-  const models = provider?.models || state.aiProviders.flatMap((item) => item.models || []);
-  modelSelect.replaceChildren(new Option("Automatic", "auto"));
-  for (const model of models) modelSelect.add(new Option(model.name || model.id, model.id));
-  if (![...modelSelect.options].some((option) => option.value === state.selectedModel)) state.selectedModel = "auto";
-  modelSelect.value = state.selectedModel;
-  modelSelect.disabled = !state.emailUser?.emailVerified || models.length === 0;
+  const badge = $("assistant-mode-label");
+  if (badge) badge.textContent = state.aiProviders.length && state.emailUser?.emailVerified ? "AI READY" : "LOCAL MODE";
 }
 
 async function loadAiModels() {
-  if (state.emailUser?.isAnonymous) {
-    $("ai-gateway-status").textContent = "AI model access requires a verified email account; the built-in local agent (live weather tools) is available now.";
-    setAssistantModels([]);
-    $("assistant-mode-label").textContent = "LOCAL AGENT";
-    return;
-  }
   if (!state.emailUser?.emailVerified || !window.WeatherGPTFirebase?.configured) {
-    $("ai-gateway-status").textContent = "Built-in local agent active. Sign in with a verified account to unlock the AI model agent.";
     setAssistantModels([]);
-    $("assistant-mode-label").textContent = "LOCAL AGENT";
     return;
   }
   try {
     const result = await window.WeatherGPTFirebase.getAiModels();
     setAssistantModels(result?.providers);
-    const available = state.aiProviders.length > 0;
-    $("ai-gateway-status").textContent = available
-      ? "AI agent online · it calls live weather tools (forecast, air quality, compare, activity planner, history, marine) server-side."
-      : "No AI provider is enabled by the administrator; the built-in local agent remains available.";
-    $("assistant-mode-label").textContent = available ? "AI AGENT" : "LOCAL AGENT";
   } catch (error) {
     console.error("AI model list could not be loaded:", error);
-    const messages = {
-      "functions/failed-precondition": "AI provider settings need a valid App Check token and an enabled provider/model in Firebase.",
-      "functions/not-found": "The Vercel AI gateway route is unavailable. Check that the current deployment includes the /api/ai/models function.",
-      "functions/unauthenticated": "Sign in with a verified email account to load AI provider settings.",
-      "functions/permission-denied": "AI provider settings are blocked by App Check. Verify Firebase App Check setup for this app.",
-      "functions/unavailable": "The AI gateway is temporarily unavailable. Try loading provider settings again later.",
-      "functions/internal": "AI provider settings could not load. Check the Vercel server logs and gateway environment variables."
-    };
-    $("ai-gateway-status").textContent = messages[error?.code] || "AI provider settings are unavailable. Check Vercel deployment and Firebase App Check configuration.";
     setAssistantModels([]);
-    $("assistant-mode-label").textContent = "LOCAL AGENT";
   }
 }
 
@@ -689,33 +834,70 @@ async function saveSignedInProfile() {
   }
 }
 
+function getSpeechLocale() {
+  const voiceLanguage = state.voiceLanguage === "auto" ? state.language : state.voiceLanguage;
+  return languageLocales[voiceLanguage] || languageLocales[state.language] || "en-IN";
+}
+
+function voiceLanguageName() {
+  const selected = $("voice-language")?.selectedOptions?.[0]?.textContent;
+  return selected && state.voiceLanguage !== "auto" ? selected : `app language (${languageLocales[state.language] || "English"})`;
+}
+
+const voiceTestPhrases = {
+  en: "WeatherGPT voice test. Your local weather assistant is ready.",
+  hi: "WeatherGPT आवाज़ परीक्षण। आपका मौसम सहायक तैयार है।",
+  bn: "WeatherGPT কণ্ঠ পরীক্ষা। আপনার আবহাওয়া সহকারী প্রস্তুত।",
+  ta: "WeatherGPT குரல் சோதனை. உங்கள் வானிலை உதவியாளர் தயாராக உள்ளது.",
+  te: "WeatherGPT వాయిస్ పరీక్ష. మీ వాతావరణ సహాయకుడు సిద్ధంగా ఉన్నారు.",
+  mr: "WeatherGPT आवाज चाचणी. तुमचा हवामान सहाय्यक तयार आहे.",
+  kn: "WeatherGPT ಧ್ವನಿ ಪರೀಕ್ಷೆ. ನಿಮ್ಮ ಹವಾಮಾನ ಸಹಾಯಕ ಸಿದ್ಧವಾಗಿದೆ.",
+  ml: "WeatherGPT ശബ്ദ പരിശോധന. നിങ്ങളുടെ കാലാവസ്ഥാ സഹായി തയ്യാറാണ്.",
+  gu: "WeatherGPT અવાજ પરીક્ષણ. તમારો હવામાન સહાયક તૈયાર છે.",
+  pa: "WeatherGPT ਆਵਾਜ਼ ਜਾਂਚ। ਤੁਹਾਡਾ ਮੌਸਮ ਸਹਾਇਕ ਤਿਆਰ ਹੈ।",
+  ur: "WeatherGPT آواز کی جانچ۔ آپ کا موسمی معاون تیار ہے۔"
+};
+
+function getVoiceTestText() {
+  const language = state.voiceLanguage === "auto" ? state.language : state.voiceLanguage;
+  return voiceTestPhrases[language] || voiceTestPhrases.en;
+}
+
 async function refreshAvailableVoices() {
   const refreshId = ++state.voiceRefreshId;
   const select = $("voice-select");
+  if (!select) return;
   const selected = state.voiceName;
-  const locale = (languageLocales[state.language] || "en-IN").split("-")[0].toLowerCase();
+  const speechLocale = getSpeechLocale();
+  const locale = speechLocale.toLowerCase().replace(/_/g, "-").split("-")[0];
   const nativeSpeech = window.WeatherGPTSpeech;
   if (nativeSpeech?.isNative) {
     try {
-      const { voices } = await nativeSpeech.textToSpeech.getSupportedVoices();
+      const result = await nativeSpeech.textToSpeech.getSupportedVoices();
       if (refreshId !== state.voiceRefreshId) return;
-      const languageVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith(locale));
-      select.replaceChildren(new Option(languageVoices.length ? "Device default" : "Device default (language voice unavailable)", "auto"));
-      languageVoices.forEach((voice) => select.add(new Option(`${voice.name} (${voice.lang})`, `native:${voice.voiceURI}`)));
+      const voices = Array.isArray(result?.voices) ? result.voices : [];
+      const languageVoices = voices.filter((voice) => String(voice.lang || "").toLowerCase().replace(/_/g, "-").split("-")[0] === locale);
+      select.replaceChildren(new Option(languageVoices.length ? "Device default" : "No installed voice for this language", "auto"));
+      languageVoices.forEach((voice) => {
+        const voiceUri = String(voice.voiceURI || voice.name || "");
+        select.add(new Option(`${voice.name || "Device voice"} (${voice.lang || speechLocale})`, `native:${voiceUri}`));
+      });
       if ([...select.options].some((option) => option.value === selected)) select.value = selected;
-      else {
-        select.value = "auto";
-        state.voiceName = "auto";
-      }
+      else { select.value = "auto"; state.voiceName = "auto"; }
+      const installHint = nativeSpeech.platform === "android"
+        ? "Tap Install device voice data to open Android’s built-in voice installer."
+        : nativeSpeech.platform === "ios"
+          ? "Install voices in Settings → Accessibility → Spoken Content → Voices."
+          : "Install a matching voice in this device’s speech settings.";
       setText("voice-device-status", languageVoices.length
-        ? `${languageVoices.length} built-in ${languageVoices.length === 1 ? "voice" : "voices"} available for ${languageLocales[state.language] || "English"}. Speech is generated on this device.`
-        : `No installed device voice was found for ${languageLocales[state.language] || "English"}. Check Android Text-to-speech settings and install a voice.`);
+        ? `${languageVoices.length} built-in ${languageVoices.length === 1 ? "voice" : "voices"} available for ${voiceLanguageName()}. Speech stays on this device.`
+        : `No installed voice was found for ${voiceLanguageName()}. ${installHint}`);
       return;
     } catch (error) {
       if (refreshId !== state.voiceRefreshId) return;
-      console.error("Unable to list Android text-to-speech voices:", error);
+      console.error("Unable to list device text-to-speech voices:", error);
       select.replaceChildren(new Option("Device default", "auto"));
-      setText("voice-device-status", "Android could not list installed voices. Check the device Text-to-speech settings.");
+      setText("voice-device-status", "The device could not list installed voices. Check its Text-to-speech settings and download the selected language pack.");
       return;
     }
   }
@@ -724,20 +906,34 @@ async function refreshAvailableVoices() {
     setText("voice-device-status", "This device does not provide a built-in speech engine.");
     return;
   }
-  const voices = window.speechSynthesis.getVoices().filter((voice) => voice.lang.toLowerCase().startsWith(locale));
-  select.replaceChildren(new Option(voices.length ? "Device default" : "No voice for this language", "auto"));
-  for (const voice of voices) {
-    const label = `${voice.name} (${voice.lang})`;
-    select.add(new Option(label, voice.voiceURI));
-  }
+  const voices = window.speechSynthesis.getVoices().filter((voice) => String(voice.lang || "").toLowerCase().replace(/_/g, "-").split("-")[0] === locale);
+  select.replaceChildren(new Option(voices.length ? "Device default" : "No installed voice for this language", "auto"));
+  for (const voice of voices) select.add(new Option(`${voice.name} (${voice.lang})`, voice.voiceURI));
   if ([...select.options].some((option) => option.value === selected)) select.value = selected;
-  else {
-    select.value = "auto";
-    state.voiceName = "auto";
-  }
+  else { select.value = "auto"; state.voiceName = "auto"; }
   setText("voice-device-status", voices.length
-    ? `${voices.length} built-in ${voices.length === 1 ? "voice" : "voices"} available for ${languageLocales[state.language] || "English"}.`
-    : `No browser voice is available for ${languageLocales[state.language] || "English"}.`);
+    ? `${voices.length} built-in ${voices.length === 1 ? "voice" : "voices"} available for ${voiceLanguageName()}.`
+    : `No browser voice is installed for ${voiceLanguageName()}. Download speech data in device settings.`);
+}
+
+async function installDeviceVoiceData() {
+  const speech = window.WeatherGPTSpeech;
+  if (speech?.platform === "android" && typeof speech.textToSpeech?.openInstall === "function") {
+    try {
+      await speech.textToSpeech.openInstall();
+      setText("voice-device-status", `Android’s built-in voice-data installer opened. Choose ${voiceLanguageName()}, install its voice pack, then return to refresh the voice list.`);
+      return;
+    } catch (error) {
+      console.warn("The built-in voice-data installer could not open:", error);
+      setText("voice-device-status", "Android could not open the voice-data installer. Open Settings → Accessibility → Text-to-speech output and install the selected language there.");
+      return;
+    }
+  }
+  if (speech?.platform === "ios") {
+    setText("voice-device-status", `To add ${voiceLanguageName()}, open Settings → Accessibility → Spoken Content → Voices and download the language pack.`);
+    return;
+  }
+  setText("voice-device-status", `Voice packs are provided by this device. To add ${voiceLanguageName()}, open its Accessibility or Text-to-speech settings, install the language, then return here.`);
 }
 
 async function speakAnswer(text) {
@@ -750,7 +946,7 @@ async function speakAnswer(text) {
       const voiceIndex = voiceURI ? voices.findIndex((voice) => voice.voiceURI === voiceURI) : -1;
       await nativeSpeech.textToSpeech.speak({
         text,
-        lang: languageLocales[state.language] || "en-IN",
+        lang: getSpeechLocale(),
         rate: Math.min(1.3, Math.max(0.7, Number(state.voiceRate) || 1)),
         volume: Math.min(1, Math.max(0, Number(state.voiceVolume) || 0)),
         queueStrategy: 0,
@@ -758,9 +954,9 @@ async function speakAnswer(text) {
       });
       setText("voice-device-status", "Speaking with the device's built-in voice. Audio stays on this device.");
     } catch (error) {
-      console.error("Android text-to-speech could not speak:", error);
-      setText("voice-device-status", "The built-in voice could not start. Check Android Text-to-speech settings and try again.");
-      showToast("Built-in speech failed. Check that an Android text-to-speech engine and voice are installed.");
+      console.error("Device text-to-speech could not speak:", error);
+      setText("voice-device-status", "The built-in voice could not start. Check your device’s Text-to-speech settings and try again.");
+      showToast("Built-in speech failed. Check that a text-to-speech engine and voice are installed.");
     }
     return;
   }
@@ -771,7 +967,7 @@ async function speakAnswer(text) {
   }
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = languageLocales[state.language] || "en-IN";
+  utterance.lang = getSpeechLocale();
   utterance.rate = Math.min(1.3, Math.max(0.7, Number(state.voiceRate) || 1));
   utterance.volume = Math.min(1, Math.max(0, Number(state.voiceVolume) || 0));
   const voices = window.speechSynthesis.getVoices();
@@ -785,9 +981,24 @@ async function speakAnswer(text) {
 }
 
 function answerQuestion(question) {
+  const q = String(question || "").trim().toLocaleLowerCase();
+  if (/^(?:hi|hello|hey|good morning|good afternoon|good evening)[!. ]*$/.test(q)) {
+    return "Hello! I’m WeatherGPT. I can help with local weather, app controls, and saved forecast details.";
+  }
+  if (/^(?:thanks|thank you|many thanks|cheers)[!. ]*$/.test(q)) {
+    return "You’re welcome. Ask me about your forecast, or say “open profile” for app settings.";
+  }
+  if (/^(?:who are you|what is your name|what's your name|introduce yourself)[?.! ]*$/.test(q)) {
+    return "I’m WeatherGPT, here to explain forecasts and help you use the app.";
+  }
+  if (/\b(help|what can you|capabilit|what do you)\b/.test(q) || /मदद|எப்படி|సహాయం/.test(q)) {
+    return "I can help with current conditions, rain chances, what to wear, the 7-day outlook, and recent climate context. You can also ask me to open Home, Map, Alerts, Climate or Profile, refresh weather, or request GPS.";
+  }
+  if (/climate|histor|trend|last month|last year|last \d+ years?|past \d+ years?|20-year|19\d{2}|20\d{2}|जलवायु|ऐतिहासिक|காலநிலை|ஆண்டுகள|વર્ષો|آب و ہوا|বছর|வெப்பநிலை.*மாற்ற|આબોહવા|જલવાયુ/.test(q)) return null;
+  const hasWeatherIntent = /\b(weather|forecast|rain|umbrella|temperature|temp|hot|cold|wind|humidity|uv|pressure|visibility|feels like|outside|sunny|sunrise|sunset|cloud|air quality|aqi|farm|crop|irrigat|spray|pesticide|harvest|aviation|flight|airport|marine|wave|coast|sea|travel|commute|road|drive|alert|warning|danger|safe|conditions)\b/.test(q) || /मौसम|बारिश|बरसात|तापमान|हवा|वर्षा|வானிலை|மழை|வெப்ப|காற்று|వాతావరణ|వర్షం|ఉష్ణ|పంట|खेती|फसल|વરસાદ|موسم|بارش/.test(q);
+  if (!hasWeatherIntent) return null;
   const data = state.weather;
-  if (!data) return "I can’t access the latest forecast yet. Please try again when weather data is available.";
-  const q = question.toLocaleLowerCase();
+  if (!data) return "I can’t access a saved or current forecast yet. Connect to the internet, load a forecast, then ask me again.";
   const current = data.current;
   const daily = data.daily;
   const location = state.location.name;
@@ -802,9 +1013,6 @@ function answerQuestion(question) {
   });
   const values = { location, temp, condition: condition.text.toLowerCase(), feels: displayTemperature(current.apparent_temperature), humidity: Math.round(current.relative_humidity_2m), wind: Math.round(current.wind_speed_10m) };
   const weatherContext = chatReply("current", values);
-  if (/\b(help|what can you|capabilit|what do you)\b/.test(q) || /मदद|எப்படி|సహాయం/.test(q)) {
-    return `I can help with current conditions, rain chances, what to wear, the 7-day outlook, and recent climate context. Try asking “Will it rain today?” or “weather in Mumbai”.`;
-  }
   if (/climate|histor|trend|last month|last year|last \d+ years?|past \d+ years?|20-year|19\d{2}|20\d{2}|जलवायु|ऐतिहासिक|காலநிலை|ஆண்டுகள|வெப்பநிலை.*மாற்ற|હવામાન પરિવર્તન|આબોહવા|موسمیاتی|ਵਰ੍ਹੇ|ਜਲਵਾਯூ|জলবায়ু|গত.*বছর/.test(q)) return null;
   if (/forecast|week|7.day|next few days|आने वाले|வார|వార/.test(q)) return `${weatherContext} ${t("sevenDayForecast")}: ${days.join("; ")}.`;
   if (/tomorrow|कल|நாளை|రేపు/.test(q)) {
@@ -894,6 +1102,38 @@ function setActiveTab(tab) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
+function installBaseMapTiles(provider) {
+  if (!state.map || !window.L) return;
+  const options = provider === "osm"
+    ? {
+      url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }
+    : {
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+      attribution: 'Powered by <a href="https://www.esri.com/" target="_blank" rel="noopener noreferrer">Esri</a> — Tiles &copy; Esri — Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom'
+    };
+  const layer = window.L.tileLayer(options.url, { maxZoom: 19, attribution: options.attribution, subdomains: options.subdomains || "abc" });
+  state.mapBaseLayer = layer;
+  state.mapTileProvider = provider;
+  state.mapTileErrors = 0;
+  layer.on("tileerror", () => {
+    if (state.mapBaseLayer !== layer) return;
+    state.mapTileErrors += 1;
+    if (state.mapTileErrors < 3) return;
+    if (!state.mapFallbackUsed) {
+      state.mapFallbackUsed = true;
+      const fallback = provider === "esri" ? "osm" : "esri";
+      setText("map-status", `Map tiles from ${provider === "esri" ? "Esri" : "OpenStreetMap"} are blocked; trying an alternate map source…`);
+      state.map.removeLayer(layer);
+      installBaseMapTiles(fallback);
+    } else {
+      setText("map-status", "Both base-map sources are unavailable. Check your connection or browser content-blocking settings; the weather-data layer can still load when online.");
+    }
+  });
+  layer.addTo(state.map);
+}
+
 function initializeMap() {
   if (state.map) return;
   if (!window.L) {
@@ -902,9 +1142,8 @@ function initializeMap() {
     return;
   }
   state.map = window.L.map("weather-map", { zoomControl: true, scrollWheelZoom: false }).setView([state.location.latitude, state.location.longitude], 7);
-  window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 18, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-  }).addTo(state.map);
+  state.mapFallbackUsed = false;
+  installBaseMapTiles("esri");
   state.mapMarker = window.L.circleMarker([state.location.latitude, state.location.longitude], {
     radius: 8, color: "#fff", weight: 3, fillColor: "#3c9663", fillOpacity: 1
   }).addTo(state.map).bindPopup(`${safeText(state.location.name)} · WeatherGPT location`);
@@ -1300,34 +1539,46 @@ function renderSavedLocations() {
   const list = $("saved-locations-list");
   if (!list) return;
   list.replaceChildren();
-  state.savedLocations.forEach((location, index) => {
+  state.savedLocations.forEach((rawLocation, index) => {
+    const location = normalizeLocation(rawLocation);
     const row = document.createElement("div");
     row.className = "saved-location-row";
+    const info = document.createElement("div");
+    info.className = "saved-location-info";
     const name = document.createElement("strong");
     name.textContent = location.name;
-    const details = document.createElement("span");
-    details.textContent = location.country || "";
+    const details = document.createElement("small");
+    details.textContent = [location.country, formatLocationCoordinates(location)].filter(Boolean).join(" · ");
+    const precision = document.createElement("small");
+    precision.className = "saved-location-precision";
+    precision.textContent = locationPrecisionLabel(location);
+    info.append(name, details, precision);
+
+    const actions = document.createElement("div");
+    actions.className = "saved-location-actions";
     const select = document.createElement("button");
     select.type = "button";
+    select.className = "saved-location-open";
     select.textContent = "Open";
     select.addEventListener("click", async () => {
-      state.location = { ...location };
-      state.locationAccuracy = null;
-      setText("location-accuracy", "Saved forecast-grid location · street-level address lookup is unavailable");
+      state.location = normalizeLocation(location);
       saveSignedInProfile();
       await loadWeather();
       setActiveTab("home");
     });
     const remove = document.createElement("button");
     remove.type = "button";
+    remove.className = "saved-location-remove";
     remove.textContent = "Remove";
     remove.setAttribute("aria-label", `Remove ${location.name}`);
     remove.addEventListener("click", () => {
       state.savedLocations.splice(index, 1);
       storeValue("wg-locations", state.savedLocations);
       renderSavedLocations();
+      updateOfflineCapabilityStatus();
     });
-    row.append(name, details, select, remove);
+    actions.append(select, remove);
+    row.append(info, actions);
     list.append(row);
   });
   if (!state.savedLocations.length) {
@@ -1339,48 +1590,89 @@ function renderSavedLocations() {
 }
 
 function saveCurrentLocation() {
-  const saved = state.savedLocations.some((location) => Math.abs(location.latitude - state.location.latitude) < 0.001 && Math.abs(location.longitude - state.location.longitude) < 0.001);
-  if (saved) { showToast(`${state.location.name} is already saved.`); return; }
-  state.savedLocations.push({ ...state.location });
+  const location = normalizeLocation(state.location);
+  const saved = state.savedLocations.some((place) => Math.abs(Number(place.latitude) - location.latitude) < 0.00001 && Math.abs(Number(place.longitude) - location.longitude) < 0.00001);
+  if (saved) { showToast(`${location.name} is already saved.`); return; }
+  state.savedLocations.push({ ...location });
   storeValue("wg-locations", state.savedLocations);
   renderSavedLocations();
+  updateOfflineCapabilityStatus();
   saveSignedInProfile();
-  showToast(`${state.location.name} saved to your locations.`);
+  showToast(`${location.name} saved with coordinates ${formatLocationCoordinates(location)}.`);
+}
+
+function explainLocationError(error) {
+  const message = String(error?.message || "");
+  const code = Number(error?.code);
+  if (code === 1 || /denied|permission/i.test(message)) {
+    return "Location permission is blocked. Allow precise location for WeatherGPT in your browser or device settings, then try again.";
+  }
+  if (code === 2 || /position unavailable|location unavailable|provider.*unavailable/i.test(message)) {
+    return "Your device could not get a GPS fix. Turn on Location/GPS, move near a window or outdoors, and try again; you can also search for a place.";
+  }
+  if (code === 3 || /timed? ?out|timeout/i.test(message)) {
+    return "Getting a GPS fix took too long. Keep Location/GPS on and retry, or search for a place instead.";
+  }
+  if (/secure origin|insecure|https/i.test(message)) {
+    return "Precise location needs a secure HTTPS connection (or the native WeatherGPT app). Open the secure app URL and try again.";
+  }
+  return message || "Your location could not be retrieved. Check location permission and GPS, then try again.";
 }
 
 async function useCurrentLocation() {
-  const button = $("use-my-location");
-  button.disabled = true;
-  button.textContent = "Finding your location…";
+  const buttons = [$("use-my-location"), $("home-use-location")].filter(Boolean);
+  const originalLabels = buttons.map((button) => button.textContent);
+  buttons.forEach((button) => { button.disabled = true; button.textContent = "Finding your location…"; });
   try {
-    const native = window.Capacitor?.Plugins?.Geolocation;
-    const position = native
-      ? await native.getCurrentPosition({ enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 })
-      : await new Promise((resolve, reject) => {
-        if (!navigator.geolocation) { reject(new Error("Location is not available in this browser.")); return; }
-        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 });
-      });
+    const locationService = window.WeatherGPTLocation?.geolocation || window.Capacitor?.Plugins?.Geolocation;
+    const native = window.WeatherGPTLocation?.isNative === true || Boolean(window.Capacitor?.isNativePlatform?.());
+    if (!native && !window.isSecureContext && !["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+      throw new Error("Precise location is available only over HTTPS in a browser.");
+    }
+    if (!locationService?.getCurrentPosition && !navigator.geolocation) {
+      throw new Error("This device does not provide a location service.");
+    }
+    if (native && locationService?.checkPermissions) {
+      let permissions = await locationService.checkPermissions();
+      if (permissions.location !== "granted" && permissions.coarseLocation !== "granted") {
+        if (typeof locationService.requestPermissions !== "function") throw new Error("Location permission is not granted.");
+        permissions = await locationService.requestPermissions();
+      }
+      if (permissions.location !== "granted" && permissions.coarseLocation !== "granted") {
+        throw new Error("Location permission was denied.");
+      }
+    }
+    const options = { enableHighAccuracy: true, timeout: 30_000, maximumAge: 0 };
+    const position = locationService?.getCurrentPosition
+      ? await locationService.getCurrentPosition(options)
+      : await new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, options));
+    if (!Number.isFinite(Number(position?.coords?.latitude)) || !Number.isFinite(Number(position?.coords?.longitude))) {
+      throw new Error("The location service returned invalid coordinates.");
+    }
     state.locationAccuracy = Number.isFinite(position.coords.accuracy) ? Math.round(position.coords.accuracy) : null;
-    state.location = {
-      name: "Current GPS point",
-      country: "Current GPS location",
+    state.location = normalizeLocation({
+      name: "Current location",
+      country: "GPS",
       latitude: position.coords.latitude,
       longitude: position.coords.longitude,
-      timezone: "auto"
-    };
-    setText("location-accuracy", state.locationAccuracy ? `GPS accuracy: ±${state.locationAccuracy} m · forecast grid location` : "GPS point selected · accuracy unavailable");
+      timezone: "auto",
+      source: "gps",
+      accuracy: position.coords.accuracy
+    });
+    renderCurrentLocationDetails();
     saveSignedInProfile();
     await loadWeather();
     setActiveTab("home");
+    return true;
   } catch (error) {
     console.error("Unable to determine device location:", error);
-    const message = error instanceof Error && /denied|permission/i.test(error.message)
-      ? "Location access was denied. Allow location permission in Android settings or search for a place."
-      : error instanceof Error ? error.message : "Could not retrieve your location.";
+    const message = explainLocationError(error);
+    setText("location-accuracy", message);
+    if (state.currentTab === "home") setText("current-location-source", message);
     showToast(message);
+    return false;
   } finally {
-    button.disabled = false;
-    button.textContent = "◎ Use my current location";
+    buttons.forEach((button, index) => { button.disabled = false; button.textContent = originalLabels[index]; });
   }
 }
 
@@ -1397,7 +1689,7 @@ async function enableNotifications() {
     state.notificationsEnabled = true;
     storeValue("wg-notifications-enabled", true);
     showToast("Local weather notifications enabled on this device.");
-    if (state.weather) checkNotificationRules(state.weather.current, state.weather.daily);
+    if (state.weather && !state.weatherStale && (typeof navigator === "undefined" || navigator.onLine !== false)) checkNotificationRules(state.weather.current, state.weather.daily);
   } catch (error) {
     console.error("Unable to request notification permission:", error);
     showToast("Notification permission could not be requested.");
@@ -1522,11 +1814,13 @@ async function handleEmailAuthState(user) {
       if (profile.preferredLanguage && translations[profile.preferredLanguage]) setLanguage(profile.preferredLanguage);
       if (profile.temperatureUnit === "fahrenheit" || profile.temperatureUnit === "celsius") setTemperatureUnit(profile.temperatureUnit);
       if (profile.defaultLocation && Number.isFinite(profile.defaultLocation.latitude) && Number.isFinite(profile.defaultLocation.longitude)) {
-        state.location = {
-          ...state.location,
+        const samePlace = Math.abs(state.location.latitude - profile.defaultLocation.latitude) < 0.00001 && Math.abs(state.location.longitude - profile.defaultLocation.longitude) < 0.00001;
+        state.location = normalizeLocation({
           ...profile.defaultLocation,
-          country: state.location.country
-        };
+          country: samePlace ? state.location.country : profile.defaultLocation.country || "",
+          source: samePlace ? state.location.source : "profile",
+          ...(samePlace && Number.isFinite(Number(state.location.accuracy)) ? { accuracy: state.location.accuracy } : {})
+        });
         storeValue("wg-current-location", state.location);
       }
       state.voiceResponses = profile.voiceResponses === true;
@@ -2128,12 +2422,99 @@ function createAgentProgress(title) {
 }
 
 function switchToLocation(place) {
-  state.location = { name: place.name, country: place.country || "", latitude: place.latitude, longitude: place.longitude, timezone: place.timezone || "auto" };
+  state.location = normalizeLocation({ name: place.name, country: place.country || "", latitude: place.latitude, longitude: place.longitude, timezone: place.timezone || "auto", source: "geocoded" });
   state.locationAccuracy = null;
-  setText("location-accuracy", "Selected forecast-grid location · street-level address lookup is unavailable");
   saveSignedInProfile();
   showToast(`Location set to ${place.name}.`);
   return loadWeather();
+}
+
+const assistantTabGuidance = {
+  home: "Home shows current conditions, the hourly outlook, saved-place weather and the activity planner.",
+  gpt: "The chat can answer weather questions, compare places and help with app controls.",
+  map: "Map shows modelled weather by layer and optional observed rain radar when connected.",
+  alerts: "Alerts shows forecast-based guidance and links to official sources; it is not an official warning feed.",
+  climate: "Climate opens historical temperature and rainfall charts; history is not a forecast.",
+  profile: "Profile contains language, units, account, saved places, notification and voice accessibility settings."
+};
+
+function recognizeAppAssistantCommand(question) {
+  const q = String(question || "").trim().toLocaleLowerCase().replace(/[?.!,;:]+$/g, "");
+  if (!q) return null;
+  if (/^(?:help|what can you do|how do i use (?:this|the) app|help me use (?:this|the) app|how do i use voice|help with (?:this|the) app)$/i.test(q) || /^(?:मदद|सहायता|உதவி|సహాయం|সাহায্য)$/.test(q)) return { type: "help" };
+
+  const tabCommand = /^(?:please\s+)?(?:open|show|go to|take me to|navigate to|switch to|launch)(?:\s+me)?\s+(.+)$/i.exec(q);
+  if (tabCommand) {
+    const target = tabCommand[1].replace(/^(?:my|the|this)\s+/, "");
+    const tab = /\b(?:home|dashboard)\b/.test(target) ? "home"
+      : /\b(?:assistant|chat|conversation|weathergpt|copilot)\b/.test(target) ? "gpt"
+        : /\b(?:map|radar)\b/.test(target) ? "map"
+          : /\b(?:alert|warning|advisory)\b/.test(target) ? "alerts"
+            : /\b(?:climate|history|historical)\b/.test(target) ? "climate"
+              : /\b(?:profile|settings|account|saved place|voice|notification)\b/.test(target) ? "profile" : null;
+    if (tab) return { type: "navigate", tab };
+  }
+  if (/^(?:stop|pause|cancel)\s+(?:speaking|reading|voice|audio)$/.test(q)) return { type: "stop-speech" };
+  if (/\b(?:turn off|disable|stop)\b.*\b(?:read answers aloud|voice responses|spoken replies)\b/.test(q)) return { type: "voice-off" };
+  if (/\b(?:turn on|enable|start)\b.*\b(?:read answers aloud|voice responses|spoken replies)\b/.test(q) || /^(?:read answers aloud|speak your replies)$/.test(q)) return { type: "voice-on" };
+  if (/\b(?:use|find|get|set|show|detect)\b.*\b(?:my|current|precise)\b.*\b(?:location|gps|coordinates)\b/.test(q) || /^(?:use gps|use my location)$/.test(q)) return { type: "gps" };
+  if (/\b(?:save|add)\b.*\b(?:this place|current place|current location|my location)\b/.test(q) || /^(?:save this place|save current location)$/.test(q)) return { type: "save-place" };
+  if (/\b(?:refresh|update|reload)\b.*\b(?:weather|forecast|conditions)\b/.test(q)) return { type: "refresh-weather" };
+  if (/\b(?:how do i|how can i|where can i|where do i)\b.*\b(?:save|add)\b.*\b(?:place|location)\b/.test(q)) return { type: "help-save-place" };
+  return null;
+}
+
+async function runAppAssistantCommand(command) {
+  if (command.type === "help") {
+    return {
+      text: "I’m WeatherGPT, your in-app weather assistant. I can summarize your forecast, compare places, open app sections, refresh weather, save the selected place, request GPS when you ask, and read replies aloud. Saved settings, chats and the last forecast snapshot remain on this device offline; live weather, online AI, maps and place search need internet.",
+      followUps: ["Plan my day", "Open profile settings", "Use my current location"]
+    };
+  }
+  if (command.type === "navigate") {
+    setActiveTab(command.tab);
+    return { text: `Opening ${command.tab === "gpt" ? "the assistant" : command.tab}. ${assistantTabGuidance[command.tab]}` };
+  }
+  if (command.type === "help-save-place") {
+    setActiveTab("profile");
+    return { text: "I opened Profile → Saved places. Search for a city, district, village or coordinates, choose a result, then tap “Save this place”. If you want this device’s exact GPS point, use “Use my current location” and allow permission first." };
+  }
+  if (command.type === "gps") {
+    const succeeded = await useCurrentLocation();
+    return { text: succeeded
+      ? `GPS location selected at ${formatLocationCoordinates(state.location)}. Device-reported accuracy: ${Number.isFinite(Number(state.location.accuracy)) ? `±${Math.round(state.location.accuracy)} m` : "not reported"}. The forecast is still model-grid data.`
+      : "I couldn’t confirm a new GPS fix. Check location permission, or search for a place instead." };
+  }
+  if (command.type === "save-place") {
+    const before = state.savedLocations.length;
+    saveCurrentLocation();
+    return { text: state.savedLocations.length > before
+      ? `${state.location.name} is saved on this device at ${formatLocationCoordinates(state.location)}.`
+      : `${state.location.name} is already in your saved places.` };
+  }
+  if (command.type === "refresh-weather") {
+    await loadWeather();
+    return { text: state.weather && !state.weatherStale
+      ? `Weather refreshed for ${state.location.name}. ${$("data-updated").textContent}.`
+      : state.weather
+        ? `I couldn’t reach the live weather service, so I’m showing the last saved forecast for ${state.location.name}, updated ${formatAge(state.weatherUpdatedAt)}.`
+        : "I couldn’t load a forecast. Connect to the internet and try again." };
+  }
+  if (command.type === "voice-on" || command.type === "voice-off") {
+    state.voiceResponses = command.type === "voice-on";
+    $("voice-responses").checked = state.voiceResponses;
+    storeValue("wg-voice-responses", state.voiceResponses);
+    saveSignedInProfile();
+    return { text: state.voiceResponses ? "Read answers aloud is on. I’ll speak future replies using your selected device voice." : "Read answers aloud is off. You can still tap the speaker beside any answer to hear it." };
+  }
+  if (command.type === "stop-speech") {
+    try {
+      if (window.WeatherGPTSpeech?.isNative) await window.WeatherGPTSpeech.textToSpeech.stop();
+      else if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    } catch (error) { console.warn("Unable to stop assistant speech:", error); }
+    return { text: "Speech stopped.", silent: true };
+  }
+  return null;
 }
 
 function askAgent(question) {
@@ -2158,23 +2539,31 @@ async function runLocalAgent(question, progress) {
 async function sendQuestion(question) {
   const cleanQuestion = question.trim();
   if (!cleanQuestion) return;
+  const appCommand = recognizeAppAssistantCommand(cleanQuestion);
+  const inputType = state.voiceQuestionPending ? "voice" : "text";
   addMessage(cleanQuestion, "user");
   const priorMessages = state.conversationMessages.slice(-10).map(({ role, content }) => ({ role, content: content.slice(0, 1900) }));
-  await persistConversationMessage({ role: "user", content: cleanQuestion, inputType: state.voiceQuestionPending ? "voice" : "text" });
+  await persistConversationMessage({ role: "user", content: cleanQuestion, inputType });
   state.voiceQuestionPending = false;
   $("chat-input").value = "";
   $("chat-input").disabled = true;
-  const gatewayReady = Boolean(state.emailUser?.emailVerified && state.aiProviders.length && state.weather);
-  const progress = createAgentProgress(gatewayReady ? "AI agent is planning and calling live weather tools…" : "Agent is planning…");
+  const online = typeof navigator === "undefined" || navigator.onLine !== false;
+  const gatewayReady = Boolean(online && state.emailUser?.emailVerified && state.aiProviders.length && state.weather);
+  const progress = createAgentProgress(appCommand ? "WeatherGPT is helping with the app…" : gatewayReady ? "AI agent is planning and calling live weather tools…" : "WeatherGPT is planning…");
   try {
     let reply;
     let replyMetadata = {};
     let extras = {};
     let gatewayFailed = false;
-    if (gatewayReady) {
+    if (appCommand) {
+      const commandResult = await runAppAssistantCommand(appCommand);
+      reply = commandResult?.text || "I couldn’t complete that app action.";
+      extras = { followUps: commandResult?.followUps || [], silent: commandResult?.silent === true };
+      replyMetadata = { provider: "local", model: "weathergpt-app-copilot" };
+    } else if (gatewayReady) {
       const payload = {
         question: cleanQuestion, location: state.location, language: state.language, history: priorMessages,
-        provider: state.selectedProvider, model: state.selectedModel
+        provider: "auto", model: "auto"
       };
       try {
         let result;
@@ -2186,48 +2575,76 @@ async function sendQuestion(question) {
           else throw error;
         }
         reply = result.answer;
+        setText("assistant-mode-label", "AI READY");
         const steps = Array.isArray(result.agent?.steps) ? result.agent.steps : [];
         replyMetadata = { provider: String(result.provider).slice(0, 40), model: String(result.model).slice(0, 80) };
         extras = { steps, sourceLabel: `${result.provider} · ${result.model}` };
-        $("ai-gateway-status").textContent = `Answered by ${result.provider} · ${result.model}${steps.length ? ` with ${steps.length} tool ${steps.length === 1 ? "call" : "calls"}` : ""}; live weather ${result.weather?.updatedAt || "retrieved by gateway"}.`;
       } catch (error) {
         console.error("AI gateway request failed:", error);
+        setText("assistant-mode-label", "LOCAL MODE");
         gatewayFailed = true;
-        $("ai-gateway-status").textContent = "AI unavailable; the built-in agent answered with live tools instead.";
       }
     }
     if (!reply) {
       try {
-        progress.setTitle("Built-in agent is calling live weather tools…");
+        progress.setTitle(state.weather && (state.weatherStale || !online)
+          ? "WeatherGPT is answering from your saved forecast…"
+          : "WeatherGPT is checking live weather…");
         const local = await runLocalAgent(cleanQuestion, progress);
         if (local?.handled) {
-          reply = `${gatewayFailed ? "The AI service is temporarily unavailable, so the built-in WeatherGPT agent answered from live Open-Meteo tools.\n\n" : ""}${local.text}`;
-          replyMetadata = { provider: "local", model: "local-agent" };
-          extras = { steps: local.steps, sourceLabel: "built-in agent", followUps: local.followUps, switchTo: local.switchTo };
+          const source = state.weather && (state.weatherStale || !online) ? "your saved forecast snapshot" : "live Open-Meteo tools";
+          const fallbackNote = gatewayFailed ? `The AI service is temporarily unavailable, so the built-in agent answered from ${source}.\n\n` : "";
+          const offlineNote = state.weather && (state.weatherStale || !online)
+            ? `\n\nUsing a cached forecast updated ${formatAge(state.weatherUpdatedAt)} ago; reconnect to verify current conditions.` : "";
+          reply = `${fallbackNote}${local.text}${offlineNote}`;
+          replyMetadata = { provider: "local", model: local.steps?.some((step) => step.tool === "get_weather") && state.weatherStale ? "offline-weather-agent" : "local-agent" };
+          extras = { steps: local.steps, sourceLabel: state.weatherStale || !online ? "saved forecast" : "built-in agent", followUps: local.followUps, switchTo: local.switchTo };
         }
       } catch (error) {
         console.error("Local agent failed:", error);
       }
     }
     if (!reply) {
-      const alias = locationAliases.find((entry) => entry.aliases.some((name) => cleanQuestion.includes(name)));
+      const alias = locationAliases.find((entry) => entry.aliases.some((name) => cleanQuestion.toLowerCase().includes(name)));
       const locationMatch = cleanQuestion.match(/\b(?:in|for|at|near)\s+([a-zA-Z][a-zA-Z .'-]{1,45}?)(?:\s+(?:today|tomorrow|this week|next week|this weekend|on the weekend))?[?.!,;:]*$/i);
-      if (alias) await findLocation(alias.search);
-      else if (locationMatch && !/^(?:today|tomorrow|week|forecast|rain|weather|climate)\b/i.test(locationMatch[1].trim())) await findLocation(locationMatch[1].trim());
-      const localReply = answerQuestion(cleanQuestion);
-      replyMetadata = { provider: "local", model: "forecast-rules" };
-      if (localReply === null) {
-        if (/last year|previous year|last month|\b(?:19|20)\d{2}\b/.test(cleanQuestion.toLowerCase())) {
-          reply = await answerClimateQuestion(cleanQuestion);
-        } else {
-          setActiveTab("climate");
-          await loadClimateHistory();
-          reply = `I opened the historical climate charts for ${state.location.name}. They use Open-Meteo's historical archive; observations are not forecasts or an official climatological record.`;
-        }
+      const matchedPlace = alias?.search || (locationMatch && !/^(?:today|tomorrow|week|forecast|rain|weather|climate)\b/i.test(locationMatch[1].trim()) ? locationMatch[1].trim() : null);
+      if (!online && matchedPlace) {
+        const selectedForecast = state.weather
+          ? `The saved forecast is for ${state.location.name}, updated ${formatAge(state.weatherUpdatedAt)} ago.`
+          : `There is no saved forecast for ${state.location.name}.`;
+        reply = `I can’t look up ${matchedPlace} while offline, so I won’t substitute another place’s weather. ${selectedForecast} Reconnect to search and compare locations.`;
+        replyMetadata = { provider: "local", model: "offline-app-help" };
+        extras = { followUps: ["Will it rain today?", "Open saved places", "Refresh weather"] };
       } else {
-        reply = gatewayFailed ? `The AI service is temporarily unavailable. Local Open-Meteo forecast guidance (not an AI response): ${localReply}` : localReply;
+        if (alias) await findLocation(alias.search);
+        else if (matchedPlace) await findLocation(matchedPlace);
+        const localReply = answerQuestion(cleanQuestion);
+        replyMetadata = { provider: "local", model: "forecast-rules" };
+        if (localReply === null) {
+          const climateQuestion = /climate|histor|trend|last month|last year|previous year|\b(?:19|20)\d{2}\b|जलवायु|ऐतिहासिक|காலநிலை|આબોહવા|જલવાયુ/.test(cleanQuestion.toLowerCase());
+          if (climateQuestion && !online) {
+            reply = "Historical climate data needs an internet connection. I can still answer basic questions from the saved forecast snapshot on this device.";
+          } else if (climateQuestion && /last year|previous year|last month|\b(?:19|20)\d{2}\b/.test(cleanQuestion.toLowerCase())) {
+            reply = await answerClimateQuestion(cleanQuestion);
+          } else if (climateQuestion) {
+            setActiveTab("climate");
+            await loadClimateHistory();
+            reply = `I opened the historical climate charts for ${state.location.name}. They use Open-Meteo's historical archive; observations are not forecasts or an official climatological record.`;
+          } else {
+            reply = gatewayFailed
+              ? "The online AI service is unavailable. I’m in WeatherGPT’s built-in mode, which is strongest at forecasts, weather guidance, and app help."
+              : "I’m in WeatherGPT’s built-in weather-assistant mode, so I can’t answer that broader question reliably here. I can help with your forecast, weather planning, or app controls.";
+            if (!online) reply += " Online AI and live place searches need an internet connection.";
+            else if (state.aiProviders.length && !state.emailUser?.emailVerified) reply += " Sign in with a verified account to use the configured online AI assistant.";
+          }
+        } else {
+          const localDisclaimer = gatewayFailed ? "The AI service is temporarily unavailable. Local forecast guidance: " : "";
+          const offlineNote = state.weather && (state.weatherStale || !online)
+            ? `\n\nUsing cached forecast data updated ${formatAge(state.weatherUpdatedAt)} ago; reconnect to verify current conditions.` : "";
+          reply = `${localDisclaimer}${localReply}${offlineNote}`;
+        }
+        extras = { followUps: ["Plan my day", "Will it rain today?", "Best time to run tomorrow?"] };
       }
-      extras = { followUps: ["Plan my day", "Will it rain today?", "Best time to run tomorrow?"] };
     }
     progress.remove();
     addMessage(reply, "assistant", false, extras);
@@ -2264,12 +2681,14 @@ async function promptForLocation() {
 async function searchLocations(query) {
   const params = new URLSearchParams({ name: query, count: "8", language: state.language, format: "json" });
   try {
-    const coordinates = query.match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/);
+    const coordinates = query.match(/^\s*(?:lat(?:itude)?\s*[:=]\s*)?(-?\d+(?:\.\d+)?)\s*°?\s*([NS])?\s*[,;]\s*(?:lon(?:gitude)?\s*[:=]\s*)?(-?\d+(?:\.\d+)?)\s*°?\s*([EW])?\s*$/i);
     if (coordinates) {
-      const latitude = Number(coordinates[1]);
-      const longitude = Number(coordinates[2]);
+      let latitude = Number(coordinates[1]);
+      let longitude = Number(coordinates[3]);
+      if (coordinates[2]) latitude = Math.abs(latitude) * (coordinates[2].toUpperCase() === "S" ? -1 : 1);
+      if (coordinates[4]) longitude = Math.abs(longitude) * (coordinates[4].toUpperCase() === "W" ? -1 : 1);
       if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) throw new Error("Latitude must be between −90 and 90 and longitude between −180 and 180.");
-      renderLocationResults([{ name: "Selected coordinates", country: `${latitude.toFixed(3)}°, ${longitude.toFixed(3)}°`, latitude, longitude, timezone: "auto" }]);
+      renderLocationResults([{ name: "Selected coordinates", country: "Manual coordinates", latitude, longitude, timezone: "auto", source: "coordinates" }]);
       return;
     }
     const response = await fetch(`${GEO_API}?${params}`);
@@ -2278,7 +2697,9 @@ async function searchLocations(query) {
     renderLocationResults(data.results || []);
   } catch (error) {
     console.error("Location search failed:", error);
-    $("location-search-results").textContent = "Location search could not connect. Check your internet connection and try again.";
+    $("location-search-results").textContent = navigator.onLine === false
+      ? "You’re offline. Connect to search for a new place, or open one of your saved locations."
+      : `Location search failed: ${error instanceof Error ? error.message : "the service did not respond"}. Check your connection and try again.`;
   }
 }
 
@@ -2313,6 +2734,7 @@ function setupVoice() {
     };
     state.browserRecognition.onresult = (event) => {
       const transcript = event.results[0][0].transcript;
+      state.voiceQuestionPending = true;
       setText("voice-status", `Heard: “${transcript}” · Getting the local forecast…`);
       sendQuestion(transcript);
     };
@@ -2341,6 +2763,7 @@ async function startVoiceInput() {
       button?.setAttribute("aria-pressed", "false");
       const transcript = result.matches?.[0]?.trim();
       if (transcript) {
+        state.voiceQuestionPending = true;
         setText("voice-status", `Heard: “${transcript}” · Getting the local forecast…`);
         await sendQuestion(transcript);
       } else {
@@ -2363,9 +2786,120 @@ async function startVoiceInput() {
   }
 }
 
+const weatherGPTTourSteps = [
+  {
+    icon: "🌦",
+    title: "Your local forecast",
+    copy: "Home shows current conditions, hourly and daily forecasts, air quality, and when the forecast was last refreshed. Tap “Use precise location” and allow location access when asked; coordinates and device-reported accuracy appear under the selected place."
+  },
+  {
+    icon: "🧭",
+    title: "Plan your day",
+    copy: "Use the briefing and activity planner to compare weather windows for walks, travel, field work, and more. These are forecast-based suggestions, not safety guarantees."
+  },
+  {
+    icon: "💬",
+    title: "Talk with WeatherGPT",
+    copy: "Ask a weather question in chat, type or use the microphone, or ask WeatherGPT to open an app section or explain a setting. Online AI answers need a configured service and eligible sign-in."
+  },
+  {
+    icon: "🗺",
+    title: "Explore the map and alerts",
+    copy: "The map displays nearby model-grid values and optional rain-radar imagery. Alerts are WeatherGPT guidance, not official government warnings; follow local authorities for emergencies."
+  },
+  {
+    icon: "⚙",
+    title: "Make WeatherGPT yours",
+    copy: "Profile contains saved places, units, voice language and installed device voices, notifications, and offline controls. On Android, use “Install device voice data” to add the selected built-in voice (including Tamil) in your device speech engine. Your latest forecast is cached on this device; live maps, GPS lookup, place search, and online AI need connectivity."
+  }
+];
+let weatherGPTTourIndex = 0;
+
+function renderWeatherGPTTourStep() {
+  const step = weatherGPTTourSteps[weatherGPTTourIndex];
+  const progress = $("tour-progress");
+  setText("tour-step-count", `Step ${weatherGPTTourIndex + 1} of ${weatherGPTTourSteps.length}`);
+  setText("tour-step-icon", step.icon);
+  setText("tour-step-title", step.title);
+  setText("tour-step-copy", step.copy);
+  if (progress) {
+    progress.max = weatherGPTTourSteps.length;
+    progress.value = weatherGPTTourIndex + 1;
+  }
+  $("tour-back").disabled = weatherGPTTourIndex === 0;
+  $("tour-next").textContent = weatherGPTTourIndex === weatherGPTTourSteps.length - 1 ? "Finish" : "Next";
+}
+
+function finishWeatherGPTTour() {
+  storeValue("wg-tour-complete", true);
+  const dialog = $("tour-dialog");
+  if (dialog?.open) dialog.close();
+}
+
+function openWeatherGPTTour() {
+  const dialog = $("tour-dialog");
+  if (!dialog || dialog.open) return;
+  weatherGPTTourIndex = 0;
+  renderWeatherGPTTourStep();
+  try {
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+  } catch (error) {
+    console.warn("The WeatherGPT tour could not open as a modal:", error);
+    dialog.setAttribute("open", "");
+  }
+}
+
+function setupWeatherGPTTour() {
+  $("start-tour").addEventListener("click", openWeatherGPTTour);
+  $("tour-close").addEventListener("click", finishWeatherGPTTour);
+  $("tour-skip").addEventListener("click", finishWeatherGPTTour);
+  $("tour-back").addEventListener("click", () => {
+    if (weatherGPTTourIndex > 0) weatherGPTTourIndex -= 1;
+    renderWeatherGPTTourStep();
+  });
+  $("tour-next").addEventListener("click", () => {
+    if (weatherGPTTourIndex === weatherGPTTourSteps.length - 1) {
+      finishWeatherGPTTour();
+      return;
+    }
+    weatherGPTTourIndex += 1;
+    renderWeatherGPTTourStep();
+  });
+  $("tour-dialog").addEventListener("cancel", () => storeValue("wg-tour-complete", true));
+  $("tour-dialog").addEventListener("close", () => storeValue("wg-tour-complete", true));
+  if (readStorage("wg-tour-complete", false) !== true) window.setTimeout(openWeatherGPTTour, 700);
+}
+
+function startWeatherMonitoring() {
+  const refreshIfDue = () => {
+    if (document.visibilityState === "hidden" || navigator.onLine === false) return;
+    if (Date.now() - state.lastWeatherAttemptAt >= 15 * 60 * 1000) void loadWeather();
+  };
+  window.addEventListener("online", () => {
+    state.weatherStale = Boolean(state.weather);
+    updateWeatherFreshness();
+    if (!state.weather || state.weatherStale || Date.now() - state.lastWeatherAttemptAt >= 2 * 60 * 1000) void loadWeather();
+  });
+  window.addEventListener("offline", () => {
+    if (state.weather) state.weatherStale = true;
+    updateWeatherFreshness();
+  });
+  document.addEventListener("visibilitychange", () => {
+    updateWeatherFreshness();
+    if (document.visibilityState === "visible") refreshIfDue();
+  });
+  state.weatherMonitorTimer = window.setInterval(refreshIfDue, 60_000);
+  state.freshnessTimer = window.setInterval(updateWeatherFreshness, 60_000);
+}
+
 function initialize() {
   if (!Array.isArray(state.savedLocations)) state.savedLocations = [];
-  if (!state.location || !Number.isFinite(Number(state.location.latitude)) || !Number.isFinite(Number(state.location.longitude))) state.location = { ...DEFAULT_LOCATION };
+  state.savedLocations = state.savedLocations
+    .filter((location) => location && Number.isFinite(Number(location.latitude)) && Number.isFinite(Number(location.longitude)) && location.latitude !== "" && location.longitude !== "")
+    .map((location) => normalizeLocation(location));
+  state.location = normalizeLocation(state.location);
+  if (state.voiceLanguage !== "auto" && !Object.hasOwn(translations, state.voiceLanguage)) state.voiceLanguage = "auto";
   if (!state.notifications || typeof state.notifications !== "object") state.notifications = { rain: false, storm: false, wind: false, heat: false, cold: false };
   if (!Object.hasOwn(mapLayerDefinitions, state.mapWeatherLayer)) state.mapWeatherLayer = "temperature";
   if (!["general", "rice", "millet", "cotton", "pulses", "vegetables", "other"].includes(state.fieldCrop)) state.fieldCrop = "general";
@@ -2380,6 +2914,7 @@ function initialize() {
     $(`${category}-notifications`).checked = Boolean(state.notifications[category]);
   }
   $("voice-responses").checked = Boolean(state.voiceResponses);
+  $("voice-language").value = state.voiceLanguage;
   $("voice-rate").value = String(Math.min(1.3, Math.max(0.7, Number(state.voiceRate) || 1)));
   $("voice-volume").value = String(Math.min(1, Math.max(0, Number(state.voiceVolume) || 0)));
   setLanguage(state.language);
@@ -2402,26 +2937,20 @@ function initialize() {
   $("email-verify-refresh").addEventListener("click", refreshEmailVerification);
   $("account-sign-out").addEventListener("click", signOutCurrentAccount);
   $("account-delete").addEventListener("click", deleteCurrentAccount);
-  $("ai-provider-select").addEventListener("change", (event) => {
-    state.selectedProvider = event.target.value;
-    state.selectedModel = "auto";
-    storeValue("wg-ai-provider", state.selectedProvider);
-    storeValue("wg-ai-model", state.selectedModel);
-    updateModelOptions();
-  });
-  $("ai-model-select").addEventListener("change", (event) => {
-    state.selectedModel = event.target.value;
-    storeValue("wg-ai-model", state.selectedModel);
-  });
   $("chat-history-search").addEventListener("input", () => renderConversationList());
+  $("voice-language").addEventListener("change", (event) => {
+    state.voiceLanguage = translations[event.target.value] || event.target.value === "auto" ? event.target.value : "auto";
+    state.voiceName = "auto";
+    storeValue("wg-voice-language", state.voiceLanguage);
+    storeValue("wg-voice-name", state.voiceName);
+    refreshAvailableVoices();
+  });
   $("voice-select").addEventListener("change", (event) => {
     state.voiceName = event.target.value;
     storeValue("wg-voice-name", state.voiceName);
   });
-  $("voice-test").addEventListener("click", () => {
-    const latestAnswer = [...state.conversationMessages].reverse().find((message) => message.role === "assistant")?.content;
-    speakAnswer(latestAnswer || "WeatherGPT voice test. Your device's built-in voice is ready.");
-  });
+  $("voice-test").addEventListener("click", () => speakAnswer(getVoiceTestText()));
+  $("voice-install").addEventListener("click", installDeviceVoiceData);
   $("voice-rate").addEventListener("input", (event) => {
     state.voiceRate = Number(event.target.value);
     storeValue("wg-voice-rate", state.voiceRate);
@@ -2465,7 +2994,9 @@ function initialize() {
   $("profile-add-location").addEventListener("click", promptForLocation);
   $("save-current-location").addEventListener("click", saveCurrentLocation);
   $("compare-saved-locations").addEventListener("click", compareSavedLocations);
-  $("use-my-location").addEventListener("click", useCurrentLocation);
+  $("use-my-location").addEventListener("click", () => useCurrentLocation());
+  $("home-use-location").addEventListener("click", () => useCurrentLocation());
+  $("clear-offline-cache").addEventListener("click", clearOfflineWeatherCache);
   $("enable-notifications").addEventListener("click", enableNotifications);
   $("voice-responses").addEventListener("change", (event) => {
     state.voiceResponses = event.target.checked;
@@ -2561,13 +3092,20 @@ function initialize() {
   $("notification-button").addEventListener("click", () => setActiveTab("alerts"));
   $("current-date").textContent = new Intl.DateTimeFormat(languageLocales[state.language] || "en-IN", { weekday: "long", month: "long", day: "numeric" }).format(new Date());
   renderSavedLocations();
+  renderCurrentLocationDetails();
+  updateOfflineCapabilityStatus();
   setWeatherRole(state.role);
   setupVoice();
+  setupWeatherGPTTour();
   void refreshAvailableVoices();
   window.speechSynthesis?.addEventListener?.("voiceschanged", refreshAvailableVoices);
+  window.addEventListener("focus", refreshAvailableVoices);
+  setText("account-status", window.WeatherGPTFirebase?.configured
+    ? "Checking this device for a securely persisted Firebase sign-in session…"
+    : "Firebase account services are not configured yet. Local weather and offline features are still available.");
   initializeFirebaseEmail();
-  loadWeather();
-  window.setInterval(loadWeather, 15 * 60 * 1000);
+  void loadWeather();
+  startWeatherMonitoring();
   if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || window.Capacitor)) {
     navigator.serviceWorker.register("./sw.js").catch((error) => console.warn("Offline weather-app caching is unavailable:", error));
   }

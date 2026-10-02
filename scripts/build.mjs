@@ -5,7 +5,7 @@ import { build } from "esbuild";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = resolve(root, "www");
-const shellFiles = ["index.html", "app.js", "local-agent.js", "styles.css", "site.webmanifest", "icon.svg", "sw.js"];
+const shellFiles = ["index.html", "app.js", "local-agent.js", "offline-cache.js", "styles.css", "site.webmanifest", "icon.svg", "sw.js"];
 
 rmSync(output, { recursive: true, force: true });
 mkdirSync(output, { recursive: true });
