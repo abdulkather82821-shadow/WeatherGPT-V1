@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const core = require("../functions/agent-core");
 const localAgent = require("../local-agent");
+const aiAgent = require("../functions/ai-agent");
 const { createAiGateway, validateChatInput } = require("../functions/ai-gateway");
 const { createMockFetch } = require("./mock-open-meteo");
 
@@ -12,6 +13,19 @@ function newAgent() {
   return { fetchImpl, agent: localAgent.createLocalAgent({ fetchImpl }) };
 }
 const context = () => ({ location: PUNE, units: "celsius", language: "en" });
+
+test("AI prompt supports conversational app help without weakening weather safety", () => {
+  const prompt = aiAgent.buildAgentSystemPrompt({
+    weather: { current: { temperature_2m: 20 }, daily: { time: ["2026-10-01"] } },
+    language: "en", location: PUNE, units: "celsius", mode: "general", nowIso: "2026-10-01T00:00:00.000Z"
+  });
+  assert.match(prompt, /general-knowledge and WeatherGPT app-use questions/i);
+  assert.match(prompt, /do not force weather into unrelated answers/i);
+  assert.match(prompt, /Sound warm and natural/i);
+  assert.match(prompt, /Profile contains saved places/i);
+  assert.match(prompt, /not official warnings/i);
+  assert.match(prompt, /do not imply a setting changed/i);
+});
 
 test("place, time and intent planning", () => {
   assert.deepEqual(localAgent.extractPlaces("compare Mumbai and Delhi").places, ["Mumbai", "Delhi"]);

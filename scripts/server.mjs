@@ -16,6 +16,7 @@ const mime = new Map([
   [".webmanifest", "application/manifest+json; charset=utf-8"]
 ]);
 const port = Number(process.env.PORT) || 8000;
+const host = process.env.HOST || "0.0.0.0";
 
 createServer((request, response) => {
   const pathname = new URL(request.url || "/", "http://localhost").pathname;
@@ -32,9 +33,8 @@ createServer((request, response) => {
   response.writeHead(200, {
     "Content-Type": mime.get(extname(file)) || "application/octet-stream",
     "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "Permissions-Policy": "camera=(), microphone=(self), geolocation=(self), payment=(), usb=()"
   });
   createReadStream(file).pipe(response);
-}).listen(port, "127.0.0.1", () => console.log(`WeatherGPT is available at http://localhost:${port}/`));
+}).listen(port, host, () => console.log(`WeatherGPT is available at http://${host}:${port}/`));
