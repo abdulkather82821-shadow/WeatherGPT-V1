@@ -8,16 +8,17 @@
   },
   "scripts": {
     "build:web": "node scripts/build.mjs",
+    "vendor:leaflet": "node scripts/vendor-leaflet.mjs",
     "android:add": "npm run build:web && cap add android",
     "android:prepare": "node scripts/android-prepare.mjs",
     "android:sync": "npm run build:web && cap sync android",
     "android:open": "cap open android",
     "android:run": "cap run android",
     "start": "npm run build:web && node scripts/server.mjs",
-    "check": "node --check app.js && node --check offline-cache.js && node --check local-agent.js && node --check functions/agent-core.js && node --check functions/ai-agent.js && node --check scripts/server.mjs && node --check functions/index.js && node --check functions/alert-conditions.js && node --check api/ai/models.js && node --check api/ai/chat.js && node --check api/ai/delete-account.js && node --check vercel/ai-gateway.js && npm run build:web",
+    "check": "node --check app.js && node --check sw.js && node --check offline-cache.js && node --check local-agent.js && node --check scripts/build.mjs && node --check scripts/vendor-leaflet.mjs && node --check functions/agent-core.js && node --check functions/ai-agent.js && node --check scripts/server.mjs && node --check functions/index.js && node --check functions/alert-conditions.js && node --check api/ai/models.js && node --check api/ai/chat.js && node --check api/ai/delete-account.js && node --check vercel/ai-gateway.js && npm run build:web",
     "test:gateway": "node --test tests/vercel-gateway.test.js",
     "test:agent": "node --test tests/agent.test.js",
-    "test": "node --test tests/vercel-gateway.test.js tests/agent.test.js tests/android-prepare.test.js tests/offline-cache.test.js"
+    "test": "node --test tests/vercel-gateway.test.js tests/agent.test.js tests/android-prepare.test.js tests/offline-cache.test.js tests/assets.test.js"
   },
   "dependencies": {
     "@capacitor-community/speech-recognition": "^7.0.1",

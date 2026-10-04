@@ -1,4 +1,7 @@
 {
+  "framework": null,
+  "buildCommand": "npm run build:web",
+  "outputDirectory": "www",
   "functions": {
     "api/ai/*.js": {
       "maxDuration": 60
