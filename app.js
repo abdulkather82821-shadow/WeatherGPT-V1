@@ -1090,16 +1090,33 @@ function setActiveTab(tab) {
     profile: navigationLabels[state.language]?.profile || "Profile"
   };
   setText("page-context", headings[tab]);
-  if (tab === "map") {
-    window.setTimeout(() => {
-      initializeMap();
-      state.map?.invalidateSize();
-      scheduleWeatherMapUpdate();
-    }, 40);
-  }
+  if (tab === "map") activateMapTab();
   if (tab === "alerts" && state.weather) renderAdvisory(state.weather.current, state.weather.daily);
   if (tab === "climate" && !$("climate-chart").children.length) loadClimateHistory();
   window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+let mapResizeObserver = null;
+
+// Leaflet measures its container when it is created, so the map tab has to be laid out
+// before the map is created — otherwise it renders at 0×0 and stays blank. Two animation
+// frames wait for the panel to become visible, and a ResizeObserver keeps the map correct
+// afterwards (rotation, resizes, desktop sidebar changes).
+function activateMapTab() {
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+    initializeMap();
+    if (!state.map) return;
+    state.map.invalidateSize();
+    scheduleWeatherMapUpdate();
+  }));
+}
+
+function watchMapContainer() {
+  if (!("ResizeObserver" in window) || mapResizeObserver || !$("weather-map")) return;
+  mapResizeObserver = new ResizeObserver(() => {
+    if (state.currentTab === "map") state.map?.invalidateSize();
+  });
+  mapResizeObserver.observe($("weather-map"));
 }
 
 function installBaseMapTiles(provider) {
@@ -1137,13 +1154,15 @@ function installBaseMapTiles(provider) {
 function initializeMap() {
   if (state.map) return;
   if (!window.L) {
-    console.error("Leaflet could not be loaded.");
-    $("map-legend").textContent = "The map library could not be loaded. Check your connection.";
+    console.error("Leaflet could not be loaded from vendor/leaflet/leaflet.js.");
+    setText("map-status", "The map library did not load, so the map cannot start. Reload the page; if it stays blank, reinstall or update the app.");
+    setText("map-source", "Map library missing");
     return;
   }
   state.map = window.L.map("weather-map", { zoomControl: true, scrollWheelZoom: false }).setView([state.location.latitude, state.location.longitude], 7);
   state.mapFallbackUsed = false;
   installBaseMapTiles("esri");
+  watchMapContainer();
   state.mapMarker = window.L.circleMarker([state.location.latitude, state.location.longitude], {
     radius: 8, color: "#fff", weight: 3, fillColor: "#3c9663", fillOpacity: 1
   }).addTo(state.map).bindPopup(`${safeText(state.location.name)} · WeatherGPT location`);

@@ -1,4 +1,4 @@
-const CACHE_NAME = "weathergpt-shell-v4";
+const CACHE_NAME = "weathergpt-shell-v5";
 const APP_FILES = [
   "./",
   "./index.html",
@@ -11,17 +11,30 @@ const APP_FILES = [
   "./offline-cache.js",
   "./site.webmanifest",
   "./icon.svg",
-  "./node_modules/leaflet/dist/leaflet.js",
-  "./node_modules/leaflet/dist/leaflet.css",
-  "./node_modules/leaflet/dist/images/layers.png",
-  "./node_modules/leaflet/dist/images/layers-2x.png",
-  "./node_modules/leaflet/dist/images/marker-icon.png",
-  "./node_modules/leaflet/dist/images/marker-icon-2x.png",
-  "./node_modules/leaflet/dist/images/marker-shadow.png"
+  "./vendor/leaflet/leaflet.js",
+  "./vendor/leaflet/leaflet.css",
+  "./vendor/leaflet/images/layers.png",
+  "./vendor/leaflet/images/layers-2x.png",
+  "./vendor/leaflet/images/marker-icon.png",
+  "./vendor/leaflet/images/marker-icon-2x.png",
+  "./vendor/leaflet/images/marker-shadow.png"
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_FILES)).then(() => self.skipWaiting()));
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    // Cache each shell file separately: one missing file (for example a build
+    // output that was not deployed) must not abort the whole offline shell and
+    // with it the map library.
+    await Promise.all(APP_FILES.map(async (file) => {
+      try {
+        await cache.add(new Request(file, { cache: "reload" }));
+      } catch (error) {
+        console.warn("WeatherGPT offline shell could not cache", file, error);
+      }
+    }));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {
@@ -31,12 +44,30 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET" || new URL(event.request.url).origin !== self.location.origin) return;
-  event.respondWith(caches.match(event.request).then((cached) => {
-    if (cached) return cached;
-    return fetch(event.request).catch((error) => {
-      if (event.request.mode === "navigate") return caches.match("./index.html");
+  const request = event.request;
+  if (request.method !== "GET") return;
+  let url;
+  try {
+    url = new URL(request.url);
+  } catch {
+    return;
+  }
+  if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
+
+  // Serve the cached shell immediately, then refresh it in the background so a
+  // new deployment is picked up on the next visit instead of being pinned
+  // forever by the cache.
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(request);
+    const network = fetch(request).then((response) => {
+      if (response && response.ok && response.type === "basic") cache.put(request, response.clone());
+      return response;
+    }).catch((error) => {
+      if (cached) return cached;
+      if (request.mode === "navigate") return cache.match("./index.html");
       throw error;
     });
-  }));
+    return cached || network;
+  })());
 });

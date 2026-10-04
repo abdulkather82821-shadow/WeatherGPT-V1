@@ -22,9 +22,13 @@ await build({
   outfile: resolve(output, "firebase-client.js")
 });
 
-const leafletSource = resolve(root, "node_modules", "leaflet", "dist");
-const leafletDestination = resolve(output, "node_modules", "leaflet", "dist");
-mkdirSync(dirname(leafletDestination), { recursive: true });
-cpSync(leafletSource, leafletDestination, { recursive: true });
+// Leaflet is vendored in the repository (refresh with `npm run vendor:leaflet`) so the
+// map library ships with every build output instead of relying on a runtime
+// node_modules path that static hosts such as Vercel do not serve.
+const leafletSource = resolve(root, "vendor", "leaflet");
+if (!existsSync(resolve(leafletSource, "leaflet.js"))) {
+  throw new Error("vendor/leaflet/leaflet.js is missing. Run `npm run vendor:leaflet` (requires `npm install`) and rebuild.");
+}
+cpSync(leafletSource, resolve(output, "vendor", "leaflet"), { recursive: true });
 
 console.log("Built the WeatherGPT web app and Android WebView assets in www/.");
